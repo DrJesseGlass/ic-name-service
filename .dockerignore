@@ -1,0 +1,20 @@
+# None of these affect the module hash; excluding them keeps the build context
+# small and the in-container build path clean. tools/reproducible-build.sh
+# builds from a `git archive` of the attested commit, so target, .dfx and .git
+# never reach the context on that path anyway; the entries below still cover
+# a direct `docker build .` on a working tree.
+target
+.dfx
+node_modules
+.git
+
+# Documentation cannot reach the wasm (nothing in canisters/ uses include_str!
+# or include_bytes!), but it sits above the build layer in COPY, so without
+# these a one-word edit to a doc invalidates the cache and forces a full
+# wasm32 release rebuild.
+*.md
+verified.json
+
+# The verifier is its own workspace (tools/verify/Cargo.toml); nothing in it
+# is compiled into the canister, and its target dir is large.
+tools/verify

@@ -1,0 +1,16 @@
+# Pinned toolchain for reproducible canister builds. Same pin as ic-git.
+#
+# The wasm the IC runs is a deterministic function of this toolchain, the
+# pinned dfx version (its bundled ic-wasm post-processes the module), the
+# committed Cargo.lock, the host platform, AND the path normalization applied
+# at build time. Build through tools/reproducible-build.sh, not a bare
+# `dfx build`, and you get a byte-identical wasm whose sha256 equals the module
+# hash the IC reports for the deployed canister.
+#
+# The rust version here is embedded in the module's `icp:public dfx` metadata
+# section, so changing it changes the module hash. Bump deliberately and
+# re-attest.
+[toolchain]
+channel = "1.94.1"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
