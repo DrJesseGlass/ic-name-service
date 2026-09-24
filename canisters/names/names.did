@@ -71,6 +71,34 @@ type HttpResponse = record {
   upgrade : opt bool;
 };
 
+// Directory (DESIGN.md section 7). Tags come from the "tags" text record:
+// comma separated, no spaces, each tag in the handle grammar.
+type SearchQuery = record {
+  q : opt text;        // case-insensitive substring of name or description
+  tag : opt text;      // only names carrying this tag
+  offset : opt nat32;
+  limit : opt nat32;   // at most 100; 20 when absent
+};
+
+type Hit = record {
+  name : text;
+  target : Target;
+  description : opt text;
+  tags : vec text;
+  repo : opt text;
+  commit : opt text;
+  module_hash : opt text;
+  updated_ns : nat64;
+};
+
+type SearchResult = record {
+  total : nat32;       // matches before paging
+  offset : nat32;
+  hits : vec Hit;
+};
+
+type TagCount = record { tag : text; count : nat32 };
+
 type Result = variant { Ok; Err : text };
 type ResolveResult = variant { Ok : Resolved; Err : text };
 
@@ -91,13 +119,18 @@ service : {
   list_names : (text) -> (vec text) query;
   resolve : (text) -> (ResolveResult) query;
 
+  // directory
+  search : (SearchQuery) -> (SearchResult) query;
+  tags : () -> (vec TagCount) query;
+
   // deployers: controllers list them; a listed deployer may announce
   add_deployer : (principal) -> (Result);
   remove_deployer : (principal) -> (Result);
   list_deployers : () -> (vec principal) query;
   announce : (Announcement) -> (Result);
 
-  // stage 1 gateway: /<name> -> 302, /api/resolve/<name> -> JSON
+  // stage 1 gateway: /<name> -> 302; /api/resolve/<name>, /api/search,
+  // /api/tags -> JSON
   http_request : (HttpRequest) -> (HttpResponse) query;
   http_request_update : (HttpRequest) -> (HttpResponse);
 }

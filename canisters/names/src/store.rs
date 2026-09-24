@@ -14,7 +14,7 @@ use serde::Deserialize;
 use std::borrow::Cow;
 use std::cell::RefCell;
 
-type Memory = VirtualMemory<DefaultMemoryImpl>;
+pub type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 /// What a name points at. Address is the terminal case; alias chains to
 /// another scoped name and is followed by `resolve` up to a bounded depth.
@@ -129,6 +129,13 @@ impl Storable for Record {
 const MEM_HANDLES: MemoryId = MemoryId::new(0);
 const MEM_RECORDS: MemoryId = MemoryId::new(1);
 const MEM_DEPLOYERS: MemoryId = MemoryId::new(2);
+/// Used by directory.rs for the tag index.
+pub const MEM_TAGS: MemoryId = MemoryId::new(3);
+
+/// A virtual memory for a map that lives in another module.
+pub fn memory(id: MemoryId) -> Memory {
+    MEMORY_MANAGER.with(|m| m.borrow().get(id))
+}
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -245,6 +252,25 @@ pub fn for_each_canonical(mut f: impl FnMut(&str, Vec<u8>)) {
             f(e.key(), e.value().canonical());
         }
     });
+}
+
+/// Every record, in name order. Search and index rebuild walk this.
+pub fn for_each_record(mut f: impl FnMut(&Record)) {
+    RECORDS.with(|r| {
+        for e in r.borrow().iter() {
+            f(&e.value());
+        }
+    });
+}
+
+impl Record {
+    /// One text record's value.
+    pub fn text(&self, key: &str) -> Option<&str> {
+        self.text
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 #[cfg(test)]
