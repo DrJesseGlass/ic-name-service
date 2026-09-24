@@ -43,8 +43,8 @@ to mainnet.
     http_request    : (HttpRequest) -> (HttpResponse) query
     http_request_update : (HttpRequest) -> (HttpResponse)
 
-Writes require the caller to own the handle. Aliases are followed up to 8
-hops and loops are refused.
+Writes require the caller to own the handle. Resolution visits at most 8
+records (the name plus 7 alias hops) and refuses loops.
 
 ## Announce
 

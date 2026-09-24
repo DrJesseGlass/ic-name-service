@@ -61,6 +61,19 @@ pub struct Record {
 }
 
 impl Record {
+    /// A fresh record with no text records; every timestamp is `now`.
+    pub fn new(name: String, owner: Principal, target: Target, now: u64) -> Self {
+        Record {
+            name,
+            owner,
+            target,
+            text: Vec::new(),
+            created_ns: now,
+            updated_ns: now,
+            changed_hands_ns: now,
+        }
+    }
+
     /// The bytes that get certified. Line oriented, pure ASCII apart from
     /// text values, one field per line, text records sorted by key. A
     /// verifier rebuilds this from the candid record it received and checks

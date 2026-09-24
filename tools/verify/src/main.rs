@@ -12,9 +12,9 @@
 //!      here from the candid record (the format is documented in
 //!      canisters/names/names.did and reimplemented on purpose, so this
 //!      file does not share code with the canister);
-//!   D. the chain is well formed: it starts at the requested name, every
-//!      alias points at the next record, and the last record's address is
-//!      the canister the answer names.
+//!   D. the chain is well formed: the answer is for the name asked, the
+//!      chain starts at it, every alias points at the next record, and the
+//!      last record's address is the canister the answer names.
 //!
 //! Usage:
 //!   cargo run --manifest-path tools/verify/Cargo.toml -- \
@@ -245,6 +245,12 @@ async fn main() {
     );
 
     // D. the chain is what it claims.
+    if resolved.name != opts.name {
+        fail(
+            "D",
+            format!("answer is for {} not {}", resolved.name, opts.name),
+        );
+    }
     if resolved.chain.is_empty() {
         fail("D", "empty chain");
     }

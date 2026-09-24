@@ -65,12 +65,12 @@ pub fn handle(req: &HttpRequest, in_update: bool) -> HttpResponse {
         return response(200, "text/plain", index().into_bytes(), !in_update);
     }
     if let Some(name) = path.strip_prefix("/api/resolve/") {
-        return api_resolve(name);
+        return api_resolve(name.trim_end_matches('/'));
     }
     let name = path.trim_start_matches('/').trim_end_matches('/');
-    match crate::resolve_inner(name.to_string()) {
-        Ok(r) => {
-            let location = format!("https://{}.icp0.io/", r.canister.to_text());
+    match crate::follow(name) {
+        Ok((canister, _)) => {
+            let location = format!("https://{}.icp0.io/", canister.to_text());
             let mut res = response(
                 302,
                 "text/plain",

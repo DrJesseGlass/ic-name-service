@@ -34,16 +34,21 @@ fn caller() -> Result<Principal, String> {
     Ok(c)
 }
 
-/// The caller must own the handle a scoped name lives under. Returns the
-/// caller and the handle's owner (equal).
-fn authorize(name: &str) -> Result<(Principal, String), String> {
-    let (handle, _) = names::split(name)?;
+/// The caller must own `handle`. Returns the handle's entry.
+fn authorize_handle(handle: &str) -> Result<Handle, String> {
     let caller = caller()?;
-    match store::handle_owner(handle) {
+    match store::get_handle(handle) {
         None => Err(format!("handle '{handle}' is not registered")),
-        Some(owner) if owner != caller => Err(format!("caller does not own handle '{handle}'")),
-        Some(_) => Ok((caller, handle.to_string())),
+        Some(h) if h.owner != caller => Err(format!("caller does not own handle '{handle}'")),
+        Some(h) => Ok(h),
     }
+}
+
+/// The caller must own the handle a scoped name lives under. Returns the
+/// caller (the handle's owner).
+fn authorize(name: &str) -> Result<Principal, String> {
+    let (handle, _) = names::split(name)?;
+    Ok(authorize_handle(handle)?.owner)
 }
 
 /// Controllers administer the deployer list.
@@ -85,12 +90,7 @@ fn get_handle(handle: String) -> Option<Handle> {
 #[ic_cdk::update]
 fn set_handle_deployer(handle: String, deployer: Option<Principal>) -> Result<(), String> {
     names::check_segment("handle", &handle)?;
-    let caller = caller()?;
-    let mut h =
-        store::get_handle(&handle).ok_or_else(|| format!("handle '{handle}' is not registered"))?;
-    if h.owner != caller {
-        return Err(format!("caller does not own handle '{handle}'"));
-    }
+    let mut h = authorize_handle(&handle)?;
     if let Some(d) = &deployer {
         if !store::is_deployer(d) {
             return Err(format!("{} is not a listed deployer", d.to_text()));
@@ -176,15 +176,8 @@ fn announce(a: Announcement) -> Result<(), String> {
     };
 
     let now = ic_cdk::api::time();
-    let mut record = store::get_record(&a.name).unwrap_or(Record {
-        name: a.name.clone(),
-        owner,
-        target: Target::Address(a.canister),
-        text: Vec::new(),
-        created_ns: now,
-        updated_ns: now,
-        changed_hands_ns: now,
-    });
+    let mut record = store::get_record(&a.name)
+        .unwrap_or_else(|| Record::new(a.name.clone(), owner, Target::Address(a.canister), now));
     record.target = Target::Address(a.canister);
     record.updated_ns = now;
     let provenance = [
@@ -214,7 +207,7 @@ fn announce(a: Announcement) -> Result<(), String> {
 /// Create or repoint a scoped name. Text records survive a repoint.
 #[ic_cdk::update]
 fn set_record(name: String, target: Target) -> Result<(), String> {
-    let (caller, _) = authorize(&name)?;
+    let caller = authorize(&name)?;
     if let Target::Alias(to) = &target {
         names::split(to)?;
         if *to == name {
@@ -228,15 +221,7 @@ fn set_record(name: String, target: Target) -> Result<(), String> {
             r.updated_ns = now;
             r
         }
-        None => Record {
-            name: name.clone(),
-            owner: caller,
-            target,
-            text: Vec::new(),
-            created_ns: now,
-            updated_ns: now,
-            changed_hands_ns: now,
-        },
+        None => Record::new(name.clone(), caller, target, now),
     };
     commit(record);
     Ok(())
@@ -311,12 +296,13 @@ fn resolve(name: String) -> Result<Resolved, String> {
     resolve_inner(name)
 }
 
-/// Shared by `resolve` and the HTTP gateway. Certification only works in a
-/// query context: `data_certificate` is None inside an update call.
-fn resolve_inner(name: String) -> Result<Resolved, String> {
-    names::split(&name)?;
+/// Follow aliases from `name` to an address. Returns the canister and every
+/// record visited, requested name first. No certification: the gateway's
+/// redirect wants only the address.
+fn follow(name: &str) -> Result<(Principal, Vec<Record>), String> {
+    names::split(name)?;
     let mut chain: Vec<Record> = Vec::new();
-    let mut current = name.clone();
+    let mut current = name.to_string();
     let canister = loop {
         if chain.len() >= certify::MAX_ALIAS_DEPTH {
             return Err(format!(
@@ -336,13 +322,21 @@ fn resolve_inner(name: String) -> Result<Resolved, String> {
             Target::Alias(n) => current = n,
         }
     };
+    Ok((canister, chain))
+}
+
+/// Shared by `resolve` and the HTTP gateway. Certification only works in a
+/// query context: `data_certificate` is None inside an update call.
+fn resolve_inner(name: String) -> Result<Resolved, String> {
+    let (canister, chain) = follow(&name)?;
     let hops: Vec<&str> = chain.iter().map(|r| r.name.as_str()).collect();
+    let witness = certify::witness(&hops);
     Ok(Resolved {
         name,
         canister,
-        chain: chain.clone(),
+        chain,
         certificate: ic_cdk::api::data_certificate(),
-        witness: certify::witness(&hops),
+        witness,
     })
 }
 

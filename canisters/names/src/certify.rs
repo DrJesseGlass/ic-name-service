@@ -11,7 +11,9 @@
 //! is fine at any scale this canister will see before delegation (M3)
 //! splits the namespace.
 
-use ic_certification::{labeled, labeled_hash, merge_hash_trees, AsHashTree, HashTree, RbTree};
+use ic_certification::{
+    labeled, labeled_hash, merge_hash_trees, pruned, AsHashTree, HashTree, RbTree,
+};
 use serde::Serialize;
 use std::cell::RefCell;
 
@@ -62,7 +64,8 @@ pub fn rebuild() {
 }
 
 /// A witness covering every name in `names`, wrapped under the label, as
-/// self-describing CBOR (what agent libraries expect for a hash tree).
+/// self-describing CBOR (what agent libraries expect for a hash tree). An
+/// empty `names` yields a fully pruned tree, never the whole map.
 pub fn witness(names: &[&str]) -> Vec<u8> {
     let tree: HashTree = TREE.with(|t| {
         let t = t.borrow();
@@ -74,7 +77,7 @@ pub fn witness(names: &[&str]) -> Vec<u8> {
                 Some(m) => merge_hash_trees(m, w),
             });
         }
-        merged.unwrap_or_else(|| t.as_hash_tree())
+        merged.unwrap_or_else(|| pruned(t.root_hash()))
     });
     let tree = labeled(LABEL, tree);
     let mut ser = serde_cbor::Serializer::new(Vec::new());
