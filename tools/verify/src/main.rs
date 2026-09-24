@@ -18,11 +18,15 @@
 //!
 //! Usage:
 //!   cargo run --manifest-path tools/verify/Cargo.toml -- \
-//!     --canister <names canister id> [--url http://127.0.0.1:4943] <name>
+//!     --canister <names canister id> [--url <boundary node>] \
+//!     [--insecure-local-root-key] <name>
 //!
-//! A URL other than https://icp-api.io (or https://ic0.app) is treated as a
-//! local replica and its root key is fetched, which is exactly the trust
-//! shortcut a mainnet verification must not take.
+//! The IC root key ships with the agent and is what every certificate is
+//! checked against, whatever --url points at. A local dfx replica has its
+//! own root key, so verifying against one needs --insecure-local-root-key,
+//! which fetches the key from the endpoint itself. That trusts the endpoint
+//! completely and is never correct for a mainnet check: a proxy that could
+//! hand out its own root key could forge everything the tool verifies.
 //!
 //! --tamper witness|record corrupts the answer after it is received, to
 //! show that checks B and C fail on a forged answer. Self-test only.
@@ -85,11 +89,13 @@ struct Opts {
     canister: Principal,
     name: String,
     tamper: Option<String>,
+    insecure_local_root_key: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: names-verify --canister <id> [--url <replica url>] [--tamper witness|record] <handle>/<label>"
+        "usage: names-verify --canister <id> [--url <replica url>] [--insecure-local-root-key] \
+         [--tamper witness|record] <handle>/<label>"
     );
     std::process::exit(2);
 }
@@ -99,6 +105,7 @@ fn parse_args() -> Opts {
     let mut canister = None;
     let mut name = None;
     let mut tamper = None;
+    let mut insecure_local_root_key = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -111,6 +118,7 @@ fn parse_args() -> Opts {
                 }));
             }
             "--tamper" => tamper = Some(args.next().unwrap_or_else(|| usage())),
+            "--insecure-local-root-key" => insecure_local_root_key = true,
             "-h" | "--help" => usage(),
             _ if a.starts_with('-') => usage(),
             _ => name = Some(a),
@@ -121,6 +129,7 @@ fn parse_args() -> Opts {
         canister: canister.unwrap_or_else(|| usage()),
         name: name.unwrap_or_else(|| usage()),
         tamper,
+        insecure_local_root_key,
     }
 }
 
@@ -132,8 +141,6 @@ fn fail(step: &str, why: impl std::fmt::Display) -> ! {
 #[tokio::main]
 async fn main() {
     let opts = parse_args();
-    let mainnet =
-        opts.url.starts_with("https://icp-api.io") || opts.url.starts_with("https://ic0.app");
 
     let agent = Agent::builder()
         .with_url(&opts.url)
@@ -142,13 +149,18 @@ async fn main() {
             eprintln!("agent: {e}");
             std::process::exit(2)
         });
-    if !mainnet {
-        // Trust the local replica's own root key. Never done for mainnet:
-        // the agent ships the real root key and checks against that.
+    if opts.insecure_local_root_key {
+        // Trust the endpoint's own root key. Only for a local replica; the
+        // flag name says what it costs. Without it the agent's built-in IC
+        // root key is used, whatever --url is.
         agent.fetch_root_key().await.unwrap_or_else(|e| {
             eprintln!("fetch_root_key: {e}");
             std::process::exit(2)
         });
+        println!(
+            "root key            : fetched from {} (INSECURE, local only)",
+            opts.url
+        );
     }
 
     let arg = Encode!(&opts.name).expect("encode name");

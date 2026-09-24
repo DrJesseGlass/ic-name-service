@@ -97,9 +97,12 @@ canister. `--tamper witness|record` forges the answer after receipt to show
 B and C fail; the smoke test runs both.
 
     cargo run --release --manifest-path tools/verify/Cargo.toml -- \
-      --canister <id> [--url http://127.0.0.1:4943] <handle>/<label>
+      --canister <id> [--url <boundary node>] <handle>/<label>
 
-Without --url it talks to mainnet and never fetches a root key.
+Certificates are always checked against the IC root key the agent ships
+with, whatever --url is. A local dfx replica has its own key, so a local
+check needs --insecure-local-root-key, which trusts the endpoint for the
+key and is never correct against mainnet.
 
 ## Build and test
 

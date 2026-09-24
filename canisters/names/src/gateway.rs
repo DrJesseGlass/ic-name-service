@@ -2,6 +2,7 @@
 //!
 //!   GET /<handle>/<label>              302 to https://<canister>.icp0.io/
 //!   GET /api/resolve/<handle>/<label>  the certified answer as JSON
+//!                                      (timestamps as decimal strings)
 //!   GET /                              a short usage page
 //!
 //! Certification at the HTTP layer is not done yet, so responses are only
@@ -93,15 +94,18 @@ fn index() -> String {
         .to_string()
 }
 
+/// Timestamps are decimal strings: nanoseconds since the epoch exceed
+/// 2^53, so a JSON number would be rounded by JavaScript and the client
+/// could no longer rebuild the canonical bytes the witness commits to.
 #[derive(Serialize)]
 struct JsonRecord {
     name: String,
     owner: String,
     target: JsonTarget,
     text: Vec<(String, String)>,
-    created_ns: u64,
-    updated_ns: u64,
-    changed_hands_ns: u64,
+    created_ns: String,
+    updated_ns: String,
+    changed_hands_ns: String,
 }
 
 #[derive(Serialize)]
@@ -140,9 +144,9 @@ fn api_resolve(name: &str) -> HttpResponse {
                             crate::store::Target::Alias(n) => JsonTarget::Alias(n),
                         },
                         text: rec.text,
-                        created_ns: rec.created_ns,
-                        updated_ns: rec.updated_ns,
-                        changed_hands_ns: rec.changed_hands_ns,
+                        created_ns: rec.created_ns.to_string(),
+                        updated_ns: rec.updated_ns.to_string(),
+                        changed_hands_ns: rec.changed_hands_ns.to_string(),
                     })
                     .collect(),
                 certificate: r.certificate.map(|c| b64.encode(c)),

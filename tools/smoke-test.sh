@@ -80,14 +80,14 @@ verify=tools/verify/target/release/names-verify
 if [ ! -x "$verify" ]; then
   (cd tools/verify && cargo build --release >/dev/null 2>&1)
 fi
-$verify --url http://127.0.0.1:4943 --canister "$names" "$handle/app" | grep >/dev/null '^VERIFIED' 
+$verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$handle/app" | grep >/dev/null '^VERIFIED' 
 echo "--- forged witness fails at B"
 # The verifier exits 1 on a failed check, which under pipefail would end
 # the script before grep sees the line, so capture first.
-out=$($verify --url http://127.0.0.1:4943 --canister "$names" --tamper witness "$handle/app" || true)
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" --tamper witness "$handle/app" || true)
 echo "$out" | grep >/dev/null '^FAILED at B' || { echo "tampered witness not caught:"; echo "$out"; exit 1; }
 echo "--- forged record fails at C"
-out=$($verify --url http://127.0.0.1:4943 --canister "$names" --tamper record "$handle/app" || true)
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" --tamper record "$handle/app" || true)
 echo "$out" | grep >/dev/null '^FAILED at C' || { echo "tampered record not caught:"; echo "$out"; exit 1; }
 
 echo "--- announce: not a deployer is refused"
@@ -134,6 +134,7 @@ json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/r
 echo "$json" | grep >/dev/null "\"canister\":\"$target\"" || { echo "api json wrong:"; echo "$json"; exit 1; }
 echo "$json" | grep >/dev/null '"certificate":"' || { echo "api json lacks certificate"; exit 1; }
 echo "$json" | grep >/dev/null '"witness":"' || { echo "api json lacks witness"; exit 1; }
+echo "$json" | grep >/dev/null '"created_ns":"[0-9]*"' || { echo "api json timestamps must be decimal strings"; echo "$json"; exit 1; }
 
 echo "--- upgrade keeps records and re-certifies"
 dfx deploy --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
