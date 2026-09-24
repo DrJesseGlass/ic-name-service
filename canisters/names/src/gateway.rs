@@ -3,6 +3,8 @@
 //!   GET /<handle>/<label>              302 to https://<canister>.icp0.io/
 //!   GET /api/resolve/<handle>/<label>  the certified answer as JSON
 //!                                      (timestamps as decimal strings)
+//!   GET /api/search?q=&tag=&offset=&limit=   directory search as JSON
+//!   GET /api/tags                      tags in use with counts
 //!   GET /                              a short usage page
 //!
 //! Certification at the HTTP layer is not done yet, so responses are only
@@ -55,6 +57,59 @@ fn path_of(url: &str) -> &str {
     &url[..end]
 }
 
+/// Query string parameters, percent-decoded, first occurrence wins.
+fn query_of(url: &str) -> Vec<(String, String)> {
+    let Some(start) = url.find('?') else {
+        return Vec::new();
+    };
+    let end = url.find('#').unwrap_or(url.len());
+    if end <= start {
+        return Vec::new();
+    }
+    url[start + 1..end]
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            (percent_decode(k), percent_decode(v))
+        })
+        .collect()
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                // Two hex digits, checked byte by byte: slicing `s` here
+                // would panic when a multibyte character follows the '%',
+                // and from_str_radix would accept a leading '+'.
+                let digit = |b: u8| (b as char).to_digit(16);
+                match (digit(bytes[i + 1]), digit(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => {
+                        out.push((hi * 16 + lo) as u8);
+                        i += 2;
+                    }
+                    _ => out.push(b'%'),
+                }
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
 /// `in_update` is true inside http_request_update: the response is final.
 /// In the query, routes that need a verifying gateway ask for the upgrade.
 pub fn handle(req: &HttpRequest, in_update: bool) -> HttpResponse {
@@ -67,6 +122,16 @@ pub fn handle(req: &HttpRequest, in_update: bool) -> HttpResponse {
     }
     if let Some(name) = path.strip_prefix("/api/resolve/") {
         return api_resolve(name.trim_end_matches('/'));
+    }
+    // Nothing in these bodies needs a query context, so like the index and
+    // the redirect they ask for the upgrade: a verifying gateway then
+    // accepts the (uncertified) response.
+    if path == "/api/search" || path == "/api/search/" {
+        return api_search(&query_of(&req.url), !in_update);
+    }
+    if path == "/api/tags" || path == "/api/tags/" {
+        let body = serde_json::to_vec(&crate::directory::tags()).expect("json");
+        return response(200, "application/json", body, !in_update);
     }
     let name = path.trim_start_matches('/').trim_end_matches('/');
     match crate::follow(name) {
@@ -88,7 +153,9 @@ pub fn handle(req: &HttpRequest, in_update: bool) -> HttpResponse {
 fn index() -> String {
     "ic-name-service\n\n\
      GET /<handle>/<label>              redirect to the canister\n\
-     GET /api/resolve/<handle>/<label>  certified answer as JSON\n\n\
+     GET /api/resolve/<handle>/<label>  certified answer as JSON\n\
+     GET /api/search?q=&tag=            directory search as JSON\n\
+     GET /api/tags                      tags in use\n\n\
      Candid: resolve, get_record, list_names, register_handle, set_record.\n\
      See DESIGN.md in the repository.\n"
         .to_string()
@@ -162,9 +229,79 @@ fn api_resolve(name: &str) -> HttpResponse {
     }
 }
 
+/// Search JSON. Hits mirror directory::Hit with the timestamp as a
+/// decimal string (see JsonRecord).
+#[derive(Serialize)]
+struct JsonHit {
+    name: String,
+    target: JsonTarget,
+    description: Option<String>,
+    tags: Vec<String>,
+    repo: Option<String>,
+    commit: Option<String>,
+    module_hash: Option<String>,
+    updated_ns: String,
+}
+
+#[derive(Serialize)]
+struct JsonSearch {
+    total: u32,
+    offset: u32,
+    hits: Vec<JsonHit>,
+}
+
+fn api_search(params: &[(String, String)], upgrade: bool) -> HttpResponse {
+    let num = |k: &str| param(params, k).and_then(|v| v.parse::<u32>().ok());
+    let result = crate::directory::search(crate::directory::SearchQuery {
+        q: param(params, "q").map(str::to_string),
+        tag: param(params, "tag").map(str::to_string),
+        offset: num("offset"),
+        limit: num("limit"),
+    });
+    let out = JsonSearch {
+        total: result.total,
+        offset: result.offset,
+        hits: result
+            .hits
+            .into_iter()
+            .map(|h| JsonHit {
+                name: h.name,
+                target: match h.target {
+                    crate::store::Target::Address(p) => JsonTarget::Address(p.to_text()),
+                    crate::store::Target::Alias(n) => JsonTarget::Alias(n),
+                },
+                description: h.description,
+                tags: h.tags,
+                repo: h.repo,
+                commit: h.commit,
+                module_hash: h.module_hash,
+                updated_ns: h.updated_ns.to_string(),
+            })
+            .collect(),
+    };
+    let body = serde_json::to_vec(&out).expect("json");
+    response(200, "application/json", body, upgrade)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_strings() {
+        let q = query_of("/api/search?q=ic%20git&tag=deploy&limit=5#x");
+        assert_eq!(param(&q, "q"), Some("ic git"));
+        assert_eq!(param(&q, "tag"), Some("deploy"));
+        assert_eq!(param(&q, "limit"), Some("5"));
+        assert_eq!(param(&q, "offset"), None);
+        assert!(query_of("/api/search").is_empty());
+        assert_eq!(percent_decode("a+b%2Fc%zz"), "a b/c%zz");
+        // A multibyte character right after a '%' must not panic, and a
+        // sign is not a hex digit (the '+' then decodes as a space).
+        assert_eq!(percent_decode("%a\u{e9}"), "%a\u{e9}");
+        assert_eq!(percent_decode("%+1"), "% 1");
+        assert_eq!(percent_decode("%41"), "A");
+    }
 
     #[test]
     fn paths() {

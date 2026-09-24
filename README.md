@@ -4,11 +4,11 @@ A resolver plus registry for canisters on the Internet Computer. A caller
 asks for a name and gets a canister id plus a subnet certificate, then talks
 to the target directly. Design brief: DESIGN.md.
 
-State: milestone M0 (DESIGN.md section 10). Scoped names
+State: milestones M0 and M1 (DESIGN.md section 10). Scoped names
 (`<handle>/<label>`), address and alias targets, text records, certified
 `resolve` with an independent verifier, `announce` gated by caller
-principal, the stage 1 HTTP gateway, and the ic-git hook. Not yet deployed
-to mainnet.
+principal, the stage 1 HTTP gateway, the ic-git hook, and the directory:
+tags and search. Not yet deployed; deployment will go through ic-git.
 
 ## Layout
 
@@ -18,7 +18,8 @@ to mainnet.
       src/names.rs           name grammar, text record and hex limits
       src/store.rs           stable-memory handles, records, deployer list
       src/certify.rs         hash tree over records, certified data, witnesses
-      src/gateway.rs         HTTP: /<name> -> 302, /api/resolve/<name> -> JSON
+      src/directory.rs       tag index and search
+      src/gateway.rs         HTTP: /<name> -> 302, /api/* -> JSON
     tools/verify/            independent verifier of a resolve answer (own
                              cargo workspace; uses ic-agent)
     tools/smoke-test.sh      end-to-end run against a local replica
@@ -40,6 +41,8 @@ to mainnet.
     add_deployer / remove_deployer : (principal) -> (Result) controllers only
     list_deployers  : () -> (vec principal) query
     announce        : (Announcement) -> (Result)            listed deployers only
+    search          : (SearchQuery) -> (SearchResult) query  substring and tag, paged
+    tags            : () -> (vec TagCount) query
     http_request    : (HttpRequest) -> (HttpResponse) query
     http_request_update : (HttpRequest) -> (HttpResponse)
 
@@ -63,18 +66,37 @@ behind `names_set_config(canister, handle)`: every repo of that instance is
 announced as `<handle>/<repo>`, and a refused or failed announce is noted
 in the deploy status without failing the deploy.
 
+## Directory
+
+A registry answers "where is X"; the directory answers "what exists".
+Tags come from the `tags` text record: comma separated, no spaces, each
+tag in the handle grammar, at most 16. A stable-memory index keyed by tag,
+kept in step on every write, answers `search` by tag with a range scan; a
+substring query over names and descriptions is a pass over all records, which is right at any size
+this canister will see before delegation. Hits carry the description, the
+tags and the provenance text records (repo, commit, module_hash) that
+announce fills in. `/api/search?q=&tag=&offset=&limit=` and `/api/tags`
+serve the same over HTTP.
+
+The verifier's check E closes the loop: when the final record pins a
+module_hash, the target canister's live module hash is read from the IC
+state tree and must match, so a name whose target was upgraded away from
+the announced code fails verification instead of silently routing.
+
 ## HTTP gateway, stage 1
 
     GET /<handle>/<label>              302 to https://<canister>.icp0.io/
     GET /api/resolve/<handle>/<label>  the certified answer as JSON
+    GET /api/search?q=&tag=&offset=&limit=   directory search as JSON
+    GET /api/tags                      tags in use with counts
     GET /                              usage
 
-HTTP responses are not certified yet. The redirect and the index ask the
-gateway to upgrade the call to an update, so they work on any domain. The
-JSON endpoint cannot, because the certificate inside the body only exists
-in a query, so it is served as a plain query: use a `raw` gateway domain or
-a direct replica request, and verify the body. Certifying the HTTP
-responses themselves is the M1 follow-up.
+HTTP responses are not certified yet. The redirect, the index, search and
+tags ask the gateway to upgrade the call to an update, so they work on any
+domain. The resolve JSON endpoint cannot, because the certificate inside
+the body only exists in a query, so it is served as a plain query: use a
+`raw` gateway domain or a direct replica request, and verify the body.
+Certifying the HTTP responses themselves is the M1 follow-up.
 
 ## Certified resolution
 
@@ -91,9 +113,10 @@ tools/verify is that verifier, written without sharing code with the
 canister. It checks (A) the certificate's signature, delegation and
 freshness against the IC root key, (B) that certified_data in the
 certificate equals the witness digest, (C) that every record in the chain
-is a leaf of the witness with the canonical bytes, and (D) that the chain
+is a leaf of the witness with the canonical bytes, (D) that the chain
 starts at the requested name, links by alias, and ends at the answered
-canister. `--tamper witness|record` forges the answer after receipt to show
+canister, and (E) that a pinned module_hash matches the target's live
+module hash. `--tamper witness|record` forges the answer after receipt to show
 B and C fail; the smoke test runs both.
 
     cargo run --release --manifest-path tools/verify/Cargo.toml -- \

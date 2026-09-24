@@ -14,7 +14,7 @@ use serde::Deserialize;
 use std::borrow::Cow;
 use std::cell::RefCell;
 
-type Memory = VirtualMemory<DefaultMemoryImpl>;
+pub type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 /// What a name points at. Address is the terminal case; alias chains to
 /// another scoped name and is followed by `resolve` up to a bounded depth.
@@ -129,6 +129,20 @@ impl Storable for Record {
 const MEM_HANDLES: MemoryId = MemoryId::new(0);
 const MEM_RECORDS: MemoryId = MemoryId::new(1);
 const MEM_DEPLOYERS: MemoryId = MemoryId::new(2);
+/// Used by directory.rs for the tag index.
+pub const MEM_TAGS: MemoryId = MemoryId::new(3);
+const MEM_META: MemoryId = MemoryId::new(4);
+
+/// Layout version of stable memory. Bump it when an upgrade must run a
+/// migration in post_upgrade. 1: M0 (handles, records, deployers).
+/// 2: M1 adds the tag index, filled from existing records on first upgrade.
+pub const SCHEMA: u32 = 2;
+const SCHEMA_KEY: &str = "schema";
+
+/// A virtual memory for a map that lives in another module.
+pub fn memory(id: MemoryId) -> Memory {
+    MEMORY_MANAGER.with(|m| m.borrow().get(id))
+}
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -136,18 +150,43 @@ thread_local! {
 
     /// handle -> Handle
     static HANDLES: RefCell<StableBTreeMap<String, Handle, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_HANDLES))),
+        StableBTreeMap::init(memory(MEM_HANDLES)),
     );
 
     /// principal (raw bytes) -> unit. Membership is the value.
     static DEPLOYERS: RefCell<StableBTreeMap<Vec<u8>, (), Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DEPLOYERS))),
+        StableBTreeMap::init(memory(MEM_DEPLOYERS)),
     );
 
     /// "<handle>/<label>" -> Record
     static RECORDS: RefCell<StableBTreeMap<String, Record, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_RECORDS))),
+        StableBTreeMap::init(memory(MEM_RECORDS)),
     );
+
+    /// Canister-level state: the schema version.
+    static META: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
+        StableBTreeMap::init(memory(MEM_META)),
+    );
+}
+
+// --- schema -----------------------------------------------------------------
+
+/// The layout the stable memory was last written with. Absent means 1:
+/// M0 wrote no marker.
+pub fn schema_version() -> u32 {
+    META.with(|m| {
+        m.borrow()
+            .get(&SCHEMA_KEY.to_string())
+            .and_then(|b| b.try_into().ok().map(u32::from_le_bytes))
+            .unwrap_or(1)
+    })
+}
+
+pub fn set_schema_version(v: u32) {
+    META.with(|m| {
+        m.borrow_mut()
+            .insert(SCHEMA_KEY.to_string(), v.to_le_bytes().to_vec());
+    });
 }
 
 // --- handles ----------------------------------------------------------------
@@ -247,6 +286,25 @@ pub fn for_each_canonical(mut f: impl FnMut(&str, Vec<u8>)) {
     });
 }
 
+/// Every record, in name order. Search and index rebuild walk this.
+pub fn for_each_record(mut f: impl FnMut(&Record)) {
+    RECORDS.with(|r| {
+        for e in r.borrow().iter() {
+            f(&e.value());
+        }
+    });
+}
+
+impl Record {
+    /// One text record's value.
+    pub fn text(&self, key: &str) -> Option<&str> {
+        self.text
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +342,13 @@ mod tests {
         let r = sample();
         let bytes = r.to_bytes().into_owned();
         assert_eq!(Record::from_bytes(Cow::Owned(bytes)), r);
+    }
+
+    #[test]
+    fn schema() {
+        assert_eq!(schema_version(), 1);
+        set_schema_version(SCHEMA);
+        assert_eq!(schema_version(), SCHEMA);
     }
 
     #[test]

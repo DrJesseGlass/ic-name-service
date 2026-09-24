@@ -1,27 +1,47 @@
 //! ic-name-service: resolver plus registry for canisters (DESIGN.md).
 //!
-//! State of play: milestone M0. Scoped names only, address and alias
-//! targets, text records, certified `resolve`, `announce` gated by caller
-//! principal, and the stage 1 HTTP gateway (path-based 302).
+//! State of play: milestones M0 and M1. Scoped names only, address and
+//! alias targets, text records, certified `resolve`, `announce` gated by
+//! caller principal, the stage 1 HTTP gateway (path-based 302), and the
+//! directory: tags and search.
 
 mod certify;
+mod directory;
 mod gateway;
 mod names;
 mod store;
 
 use candid::{CandidType, Principal};
+use directory::{SearchQuery, SearchResult, TagCount};
 use store::{Handle, Record, Target};
 
 // --- lifecycle --------------------------------------------------------------
 
 #[ic_cdk::init]
 fn init() {
+    store::set_schema_version(store::SCHEMA);
     certify::rebuild();
 }
 
+/// The certified tree is heap state and is rebuilt on every upgrade. The
+/// tag index is stable memory kept in step on every write, so it is only
+/// rebuilt when the schema version says the stored data predates it (an
+/// M0 canister had tags text records and no index). A newer schema than
+/// this code knows is refused rather than misread.
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
+    let from = store::schema_version();
+    if from > store::SCHEMA {
+        ic_cdk::trap(format!(
+            "stable memory schema {from} is newer than this code's {}",
+            store::SCHEMA
+        ));
+    }
     certify::rebuild();
+    if from < 2 {
+        directory::rebuild();
+    }
+    store::set_schema_version(store::SCHEMA);
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -60,7 +80,13 @@ fn admin() -> Result<Principal, String> {
     Ok(c)
 }
 
+/// Write a record everywhere it lives: the tag index, the certified tree
+/// and stable memory.
 fn commit(record: Record) {
+    if let Some(old) = store::get_record(&record.name) {
+        directory::unindex(&old);
+    }
+    directory::index(&record);
     certify::set(&record.name, record.canonical());
     store::put_record(record);
 }
@@ -236,6 +262,9 @@ fn set_text(name: String, key: String, value: Option<String>) -> Result<(), Stri
     record.text.retain(|(k, _)| *k != key);
     if let Some(v) = value {
         names::check_text_value(&v)?;
+        if key == "tags" {
+            names::check_tags(&v)?;
+        }
         if record.text.len() >= names::MAX_TEXT_RECORDS {
             return Err(format!(
                 "at most {} text records per name",
@@ -254,7 +283,8 @@ fn set_text(name: String, key: String, value: Option<String>) -> Result<(), Stri
 fn delete_record(name: String) -> Result<(), String> {
     authorize(&name)?;
     match store::delete_record(&name) {
-        Some(_) => {
+        Some(old) => {
+            directory::unindex(&old);
             certify::remove(&name);
             Ok(())
         }
@@ -270,6 +300,23 @@ fn get_record(name: String) -> Option<Record> {
 #[ic_cdk::query]
 fn list_names(handle: String) -> Vec<String> {
     store::names_under(&handle)
+}
+
+// --- directory (DESIGN.md section 7) ----------------------------------------
+
+#[ic_cdk::query]
+fn search(query: SearchQuery) -> SearchResult {
+    directory::search(query)
+}
+
+#[ic_cdk::query]
+fn tags() -> Vec<TagCount> {
+    directory::tags()
+}
+
+#[ic_cdk::query]
+fn schema_version() -> u32 {
+    store::schema_version()
 }
 
 // --- resolve ----------------------------------------------------------------

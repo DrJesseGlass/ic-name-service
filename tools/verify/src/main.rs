@@ -296,6 +296,27 @@ async fn main() {
         ),
     }
     println!("D chain             : ok");
+
+    // E. module hash pin.
+    match last.text.iter().find(|(k, _)| k == "module_hash") {
+        None => println!("E module hash       : not pinned (no module_hash text record)"),
+        Some((_, want)) => {
+            let live = agent
+                .read_state_canister_info(resolved.canister, "module_hash")
+                .await
+                .unwrap_or_else(|e| fail("E", format!("cannot read live module hash: {e}")));
+            let live = hex(&live);
+            if live != *want {
+                fail(
+                    "E",
+                    format!(
+                        "live module hash {live} != pinned {want}: the target no longer runs the announced code"
+                    ),
+                );
+            }
+            println!("E module hash       : ok (live module matches the pinned {want})");
+        }
+    }
     println!(
         "VERIFIED {} -> {}",
         resolved.name,

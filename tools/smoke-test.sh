@@ -121,6 +121,33 @@ echo "--- remove_deployer"
 call remove_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
 call announce "$ann" | grep >/dev/null 'not a listed deployer' 
 
+echo "--- tags: bad values refused, good value indexed"
+call set_text "(\"$handle/app\", \"tags\", opt \"git, deploy\")" | grep >/dev/null 'Err'
+call set_text "(\"$handle/app\", \"tags\", opt \"git,git\")" | grep >/dev/null 'Err'
+call set_text "(\"$handle/app\", \"tags\", opt \"git,smoke-$handle\")" | grep >/dev/null 'Ok'
+call tags | grep >/dev/null "smoke-$handle"
+echo "--- search by substring of the description"
+out=$(call search "(record { q = opt \"SMOKE TEST\" })")
+echo "$out" | grep >/dev/null "$handle/app" || { echo "search by description failed:"; echo "$out"; exit 1; }
+echo "--- search by tag, paged"
+out=$(call search "(record { tag = opt \"smoke-$handle\"; limit = opt 1 })")
+echo "$out" | grep >/dev/null 'total = 1 : nat32' || { echo "search by tag failed:"; echo "$out"; exit 1; }
+echo "--- retag drops the old tag"
+call set_text "(\"$handle/app\", \"tags\", opt \"deploy\")" | grep >/dev/null 'Ok'
+out=$(call search "(record { tag = opt \"smoke-$handle\" })")
+echo "$out" | grep >/dev/null 'total = 0 : nat32' || { echo "old tag still indexed:"; echo "$out"; exit 1; }
+echo "--- announce with the real module hash, then verifier check E passes"
+live=$(dfx canister info names | awk '/Module hash/{sub(/^0x/, "", $3); print $3}')
+call add_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
+call announce "(record { name = \"$handle/self\"; canister = principal \"$target\"; repo = \"ic-name-service\"; commit = \"$commit\"; module_hash = \"$live\" })" | grep >/dev/null 'Ok'
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$handle/self" || true)
+echo "$out" | grep >/dev/null '^E module hash       : ok' || { echo "check E did not pass on a true pin:"; echo "$out"; exit 1; }
+echo "--- a stale pin fails check E"
+call announce "(record { name = \"$handle/stale\"; canister = principal \"$target\"; repo = \"ic-name-service\"; commit = \"$commit\"; module_hash = \"$hash\" })" | grep >/dev/null 'Ok'
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$handle/stale" || true)
+echo "$out" | grep >/dev/null '^FAILED at E' || { echo "stale pin not caught:"; echo "$out"; exit 1; }
+call remove_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
+
 echo "--- http gateway through the local dfx gateway"
 gw() { curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943$1"; }
 got=$(gw "/$handle/app")
@@ -135,11 +162,19 @@ echo "$json" | grep >/dev/null "\"canister\":\"$target\"" || { echo "api json wr
 echo "$json" | grep >/dev/null '"certificate":"' || { echo "api json lacks certificate"; exit 1; }
 echo "$json" | grep >/dev/null '"witness":"' || { echo "api json lacks witness"; exit 1; }
 echo "$json" | grep >/dev/null '"created_ns":"[0-9]*"' || { echo "api json timestamps must be decimal strings"; echo "$json"; exit 1; }
+echo "--- /api/search and /api/tags JSON (raw query)"
+json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/search?q=smoke+test&tag=deploy&limit=5")
+echo "$json" | grep >/dev/null "\"name\":\"$handle/app\"" || { echo "api search wrong:"; echo "$json"; exit 1; }
+echo "$json" | grep >/dev/null '"updated_ns":"[0-9]*"' || { echo "api search timestamps must be strings"; echo "$json"; exit 1; }
+json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/tags")
+echo "$json" | grep >/dev/null '"tag":"deploy"' || { echo "api tags wrong:"; echo "$json"; exit 1; }
 
-echo "--- upgrade keeps records and re-certifies"
+echo "--- upgrade keeps records, re-certifies, and lands on the current schema"
 dfx deploy --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
 out=$(call resolve "(\"$handle/app\")")
 echo "$out" | grep >/dev/null "canister = principal \"$target\"" || { echo "record lost across upgrade"; exit 1; }
 echo "$out" | grep >/dev/null 'certificate = opt blob' || { echo "no certificate after upgrade"; exit 1; }
+call schema_version | grep >/dev/null '(2 : nat32)' || { echo "schema not at 2 after upgrade"; exit 1; }
+call search "(record { tag = opt \"deploy\" })" | grep >/dev/null "$handle/app" || { echo "tag index lost across upgrade"; exit 1; }
 
 echo "SMOKE OK"

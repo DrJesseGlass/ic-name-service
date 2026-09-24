@@ -72,6 +72,25 @@ pub fn check_text_value(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub const MAX_TAGS: usize = 16;
+
+/// The "tags" text record: comma separated, no spaces, each tag in the
+/// segment grammar, at most 16, no duplicates. Returns the tags.
+pub fn check_tags(value: &str) -> Result<Vec<String>, String> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in value.split(',') {
+        check_segment("tag", tag)?;
+        if tags.iter().any(|t| t == tag) {
+            return Err(format!("duplicate tag '{tag}'"));
+        }
+        tags.push(tag.to_string());
+    }
+    if tags.len() > MAX_TAGS {
+        return Err(format!("at most {MAX_TAGS} tags"));
+    }
+    Ok(tags)
+}
+
 /// Lowercase hex of exactly one of the given byte lengths (a git commit is
 /// 20 bytes, a module hash 32).
 pub fn check_hex(what: &str, s: &str, byte_lens: &[usize]) -> Result<(), String> {
@@ -94,6 +113,30 @@ pub fn check_hex(what: &str, s: &str, byte_lens: &[usize]) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tags() {
+        assert_eq!(check_tags("git,deploy").unwrap(), vec!["git", "deploy"]);
+        assert_eq!(check_tags("git").unwrap(), vec!["git"]);
+        assert!(check_tags("").is_err());
+        assert!(check_tags("git, deploy").is_err());
+        assert!(check_tags("git,git").is_err());
+        assert!(check_tags("Git").is_err());
+        assert!(check_tags(
+            &(0..16)
+                .map(|i| format!("t{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .is_ok());
+        assert!(check_tags(
+            &(0..17)
+                .map(|i| format!("t{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .is_err());
+    }
 
     #[test]
     fn hex() {
