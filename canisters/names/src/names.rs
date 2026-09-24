@@ -72,9 +72,37 @@ pub fn check_text_value(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Lowercase hex of exactly one of the given byte lengths (a git commit is
+/// 20 bytes, a module hash 32).
+pub fn check_hex(what: &str, s: &str, byte_lens: &[usize]) -> Result<(), String> {
+    if !s.len().is_multiple_of(2) || !byte_lens.contains(&(s.len() / 2)) {
+        let want: Vec<String> = byte_lens.iter().map(|n| (n * 2).to_string()).collect();
+        return Err(format!(
+            "{what} must be {} hex characters",
+            want.join(" or ")
+        ));
+    }
+    if !s
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(format!("{what} must be lowercase hex"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex() {
+        assert!(check_hex("commit", &"ab".repeat(20), &[20]).is_ok());
+        assert!(check_hex("hash", &"ab".repeat(32), &[20, 32]).is_ok());
+        assert!(check_hex("hash", &"AB".repeat(32), &[32]).is_err());
+        assert!(check_hex("hash", &"ab".repeat(31), &[32]).is_err());
+        assert!(check_hex("hash", "abc", &[32]).is_err());
+    }
 
     #[test]
     fn segments() {

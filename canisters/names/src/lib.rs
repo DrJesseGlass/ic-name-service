@@ -1,15 +1,16 @@
 //! ic-name-service: resolver plus registry for canisters (DESIGN.md).
 //!
-//! State of play: milestone M0, the resolve half. Scoped names only,
-//! address and alias targets, text records, certified `resolve`. Announce,
-//! the HTTP gateway and the ic-git hook come next.
+//! State of play: milestone M0. Scoped names only, address and alias
+//! targets, text records, certified `resolve`, `announce` gated by caller
+//! principal, and the stage 1 HTTP gateway (path-based 302).
 
 mod certify;
+mod gateway;
 mod names;
 mod store;
 
 use candid::{CandidType, Principal};
-use store::{Record, Target};
+use store::{Handle, Record, Target};
 
 // --- lifecycle --------------------------------------------------------------
 
@@ -33,7 +34,8 @@ fn caller() -> Result<Principal, String> {
     Ok(c)
 }
 
-/// The caller must own the handle a scoped name lives under.
+/// The caller must own the handle a scoped name lives under. Returns the
+/// caller and the handle's owner (equal).
 fn authorize(name: &str) -> Result<(Principal, String), String> {
     let (handle, _) = names::split(name)?;
     let caller = caller()?;
@@ -42,6 +44,15 @@ fn authorize(name: &str) -> Result<(Principal, String), String> {
         Some(owner) if owner != caller => Err(format!("caller does not own handle '{handle}'")),
         Some(_) => Ok((caller, handle.to_string())),
     }
+}
+
+/// Controllers administer the deployer list.
+fn admin() -> Result<Principal, String> {
+    let c = caller()?;
+    if !ic_cdk::api::is_controller(&c) {
+        return Err("caller is not a controller".to_string());
+    }
+    Ok(c)
 }
 
 fn commit(record: Record) {
@@ -62,6 +73,140 @@ fn register_handle(handle: String) -> Result<(), String> {
 #[ic_cdk::query]
 fn handle_owner(handle: String) -> Option<Principal> {
     store::handle_owner(&handle)
+}
+
+#[ic_cdk::query]
+fn get_handle(handle: String) -> Option<Handle> {
+    store::get_handle(&handle)
+}
+
+/// Let one listed deployer announce names under the caller's handle, or
+/// revoke that (None).
+#[ic_cdk::update]
+fn set_handle_deployer(handle: String, deployer: Option<Principal>) -> Result<(), String> {
+    names::check_segment("handle", &handle)?;
+    let caller = caller()?;
+    let mut h =
+        store::get_handle(&handle).ok_or_else(|| format!("handle '{handle}' is not registered"))?;
+    if h.owner != caller {
+        return Err(format!("caller does not own handle '{handle}'"));
+    }
+    if let Some(d) = &deployer {
+        if !store::is_deployer(d) {
+            return Err(format!("{} is not a listed deployer", d.to_text()));
+        }
+    }
+    h.deployer = deployer;
+    store::put_handle(&handle, h);
+    Ok(())
+}
+
+// --- deployers (DESIGN.md section 8) ----------------------------------------
+
+#[ic_cdk::update]
+fn add_deployer(p: Principal) -> Result<(), String> {
+    admin()?;
+    if p == Principal::anonymous() {
+        return Err("anonymous cannot be a deployer".to_string());
+    }
+    store::add_deployer(p);
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn remove_deployer(p: Principal) -> Result<(), String> {
+    admin()?;
+    if store::remove_deployer(&p) {
+        Ok(())
+    } else {
+        Err(format!("{} is not a listed deployer", p.to_text()))
+    }
+}
+
+#[ic_cdk::query]
+fn list_deployers() -> Vec<Principal> {
+    store::list_deployers()
+}
+
+/// What a deployer (ic-git) reports after a successful install. Mirrors
+/// ic-git's DeployRecord: commit, target, wasm_sha256.
+#[derive(CandidType, serde::Deserialize, Clone, Debug)]
+struct Announcement {
+    /// The scoped name to create or update, `<handle>/<label>`.
+    name: String,
+    /// The canister the code was installed into.
+    canister: Principal,
+    /// Repository the code came from, as the deployer names it.
+    repo: String,
+    /// Git commit that was built, lowercase hex.
+    commit: String,
+    /// sha256 of the installed module, lowercase hex.
+    module_hash: String,
+}
+
+/// Trusted by CALLER PRINCIPAL: the caller must be a listed deployer. It
+/// may write under a handle it owns, or one whose owner named it via
+/// set_handle_deployer. An unregistered handle is registered to the
+/// deployer, so anything deployed by git push gets listed with no one
+/// registering first (DESIGN.md section 7). The record's target becomes
+/// the announced canister and its text records carry the provenance.
+#[ic_cdk::update]
+fn announce(a: Announcement) -> Result<(), String> {
+    let deployer = caller()?;
+    if !store::is_deployer(&deployer) {
+        return Err(format!("{} is not a listed deployer", deployer.to_text()));
+    }
+    let (handle, _) = names::split(&a.name)?;
+    names::check_hex("commit", &a.commit, &[20, 32])?;
+    names::check_hex("module_hash", &a.module_hash, &[32])?;
+    names::check_text_value(&a.repo)?;
+
+    let owner = match store::get_handle(handle) {
+        None => {
+            store::register_handle(handle, deployer)?;
+            deployer
+        }
+        Some(h) if h.owner == deployer || h.deployer == Some(deployer) => h.owner,
+        Some(_) => {
+            return Err(format!(
+                "handle '{handle}' does not allow deployer {}",
+                deployer.to_text()
+            ))
+        }
+    };
+
+    let now = ic_cdk::api::time();
+    let mut record = store::get_record(&a.name).unwrap_or(Record {
+        name: a.name.clone(),
+        owner,
+        target: Target::Address(a.canister),
+        text: Vec::new(),
+        created_ns: now,
+        updated_ns: now,
+        changed_hands_ns: now,
+    });
+    record.target = Target::Address(a.canister);
+    record.updated_ns = now;
+    let provenance = [
+        ("repo", a.repo),
+        ("commit", a.commit),
+        ("module_hash", a.module_hash),
+        ("deployer", deployer.to_text()),
+        ("announced_ns", now.to_string()),
+    ];
+    for (k, v) in provenance {
+        record.text.retain(|(key, _)| key != k);
+        record.text.push((k.to_string(), v));
+    }
+    record.text.sort_by(|x, y| x.0.cmp(&y.0));
+    if record.text.len() > names::MAX_TEXT_RECORDS {
+        return Err(format!(
+            "at most {} text records per name",
+            names::MAX_TEXT_RECORDS
+        ));
+    }
+    commit(record);
+    Ok(())
 }
 
 // --- records ----------------------------------------------------------------
@@ -163,6 +308,12 @@ struct Resolved {
 
 #[ic_cdk::query]
 fn resolve(name: String) -> Result<Resolved, String> {
+    resolve_inner(name)
+}
+
+/// Shared by `resolve` and the HTTP gateway. Certification only works in a
+/// query context: `data_certificate` is None inside an update call.
+fn resolve_inner(name: String) -> Result<Resolved, String> {
     names::split(&name)?;
     let mut chain: Vec<Record> = Vec::new();
     let mut current = name.clone();
@@ -193,6 +344,18 @@ fn resolve(name: String) -> Result<Resolved, String> {
         certificate: ic_cdk::api::data_certificate(),
         witness: certify::witness(&hops),
     })
+}
+
+// --- HTTP gateway, stage 1 (DESIGN.md section 6) -----------------------------
+
+#[ic_cdk::query]
+fn http_request(req: gateway::HttpRequest) -> gateway::HttpResponse {
+    gateway::handle(&req, false)
+}
+
+#[ic_cdk::update]
+fn http_request_update(req: gateway::HttpRequest) -> gateway::HttpResponse {
+    gateway::handle(&req, true)
 }
 
 ic_cdk::export_candid!();

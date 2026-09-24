@@ -14,3 +14,7 @@ node_modules
 # wasm32 release rebuild.
 *.md
 verified.json
+
+# The verifier is its own workspace (tools/verify/Cargo.toml); nothing in it
+# is compiled into the canister, and its target dir is large.
+tools/verify

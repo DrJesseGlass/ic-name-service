@@ -1,8 +1,10 @@
 //! Stable-memory registry: handles and records (DESIGN.md section 3).
 //!
-//! Two maps. HANDLES: handle -> owner principal. RECORDS: scoped name ->
-//! Record. Records are candid-encoded in stable memory; the certified form
-//! is the canonical text in `Record::canonical`, not the candid bytes.
+//! Three maps. HANDLES: handle -> Handle (owner, allowed deployer).
+//! RECORDS: scoped name -> Record. DEPLOYERS: principals whose `announce`
+//! calls are trusted (DESIGN.md section 8). Values are candid-encoded in
+//! stable memory; the certified form is the canonical text in
+//! `Record::canonical`, not the candid bytes.
 
 use candid::{CandidType, Decode, Encode, Principal};
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
@@ -22,6 +24,27 @@ pub enum Target {
     Address(Principal),
     #[serde(rename = "alias")]
     Alias(String),
+}
+
+/// A handle and who may write under it. `deployer`, if set, is one listed
+/// deployer (see DEPLOYERS) the owner lets announce names here.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Handle {
+    pub owner: Principal,
+    pub deployer: Option<Principal>,
+}
+
+impl Storable for Handle {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).expect("encode Handle"))
+    }
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).expect("encode Handle")
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(&bytes, Handle).expect("decode Handle")
+    }
+    const BOUND: Bound = Bound::Unbounded;
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -92,14 +115,20 @@ impl Storable for Record {
 
 const MEM_HANDLES: MemoryId = MemoryId::new(0);
 const MEM_RECORDS: MemoryId = MemoryId::new(1);
+const MEM_DEPLOYERS: MemoryId = MemoryId::new(2);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
-    /// handle -> owner principal (raw bytes)
-    static HANDLES: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> = RefCell::new(
+    /// handle -> Handle
+    static HANDLES: RefCell<StableBTreeMap<String, Handle, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_HANDLES))),
+    );
+
+    /// principal (raw bytes) -> unit. Membership is the value.
+    static DEPLOYERS: RefCell<StableBTreeMap<Vec<u8>, (), Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DEPLOYERS))),
     );
 
     /// "<handle>/<label>" -> Record
@@ -110,12 +139,12 @@ thread_local! {
 
 // --- handles ----------------------------------------------------------------
 
+pub fn get_handle(handle: &str) -> Option<Handle> {
+    HANDLES.with(|h| h.borrow().get(&handle.to_string()))
+}
+
 pub fn handle_owner(handle: &str) -> Option<Principal> {
-    HANDLES.with(|h| {
-        h.borrow()
-            .get(&handle.to_string())
-            .map(|b| Principal::from_slice(&b))
-    })
+    get_handle(handle).map(|h| h.owner)
 }
 
 /// First come, first served. Returns Err if taken.
@@ -125,8 +154,45 @@ pub fn register_handle(handle: &str, owner: Principal) -> Result<(), String> {
         if h.contains_key(&handle.to_string()) {
             return Err(format!("handle '{handle}' is taken"));
         }
-        h.insert(handle.to_string(), owner.as_slice().to_vec());
+        h.insert(
+            handle.to_string(),
+            Handle {
+                owner,
+                deployer: None,
+            },
+        );
         Ok(())
+    })
+}
+
+pub fn put_handle(handle: &str, value: Handle) {
+    HANDLES.with(|h| {
+        h.borrow_mut().insert(handle.to_string(), value);
+    });
+}
+
+// --- deployers --------------------------------------------------------------
+
+pub fn is_deployer(p: &Principal) -> bool {
+    DEPLOYERS.with(|d| d.borrow().contains_key(&p.as_slice().to_vec()))
+}
+
+pub fn add_deployer(p: Principal) {
+    DEPLOYERS.with(|d| {
+        d.borrow_mut().insert(p.as_slice().to_vec(), ());
+    });
+}
+
+pub fn remove_deployer(p: &Principal) -> bool {
+    DEPLOYERS.with(|d| d.borrow_mut().remove(&p.as_slice().to_vec()).is_some())
+}
+
+pub fn list_deployers() -> Vec<Principal> {
+    DEPLOYERS.with(|d| {
+        d.borrow()
+            .iter()
+            .map(|e| Principal::from_slice(e.key()))
+            .collect()
     })
 }
 
@@ -214,6 +280,21 @@ mod tests {
         assert!(register_handle("alice", alice).is_err());
         assert_eq!(handle_owner("alice"), Some(alice));
         assert_eq!(handle_owner("bob"), None);
+        let deployer = Principal::from_text("umobs-yiaaa-aaaab-agyrq-cai").unwrap();
+        assert!(!is_deployer(&deployer));
+        add_deployer(deployer);
+        assert!(is_deployer(&deployer));
+        assert_eq!(list_deployers(), vec![deployer]);
+        put_handle(
+            "alice",
+            Handle {
+                owner: alice,
+                deployer: Some(deployer),
+            },
+        );
+        assert_eq!(get_handle("alice").unwrap().deployer, Some(deployer));
+        assert!(remove_deployer(&deployer));
+        assert!(!is_deployer(&deployer));
         put_record(sample());
         let mut other = sample();
         other.name = "alice/other".into();

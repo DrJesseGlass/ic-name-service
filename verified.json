@@ -1,0 +1,5 @@
+{
+  "canister": "",
+  "note": "Machine-readable record of reproduced module hashes, same shape as ic-git's verified.json. Newest entry last. Empty until the first mainnet deploy; tools/reproducible-build.sh --docker --check fills the first entry.",
+  "verified": []
+}

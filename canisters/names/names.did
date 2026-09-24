@@ -27,7 +27,7 @@ type Record = record {
   name : text;
   owner : principal;
   target : Target;
-  text : vec record { text; text };
+  "text" : vec record { text; text };
   created_ns : nat64;
   updated_ns : nat64;
   changed_hands_ns : nat64;
@@ -41,6 +41,36 @@ type Resolved = record {
   witness : blob;
 };
 
+type Handle = record {
+  owner : principal;
+  // A listed deployer the owner lets announce under this handle.
+  deployer : opt principal;
+};
+
+// What a deployer reports after a successful install (ic-git's
+// DeployRecord: commit, target, wasm_sha256). Trusted by caller principal.
+type Announcement = record {
+  name : text;
+  canister : principal;
+  repo : text;
+  commit : text;
+  module_hash : text;
+};
+
+type HttpRequest = record {
+  method : text;
+  url : text;
+  headers : vec record { text; text };
+  body : blob;
+};
+
+type HttpResponse = record {
+  status_code : nat16;
+  headers : vec record { text; text };
+  body : blob;
+  upgrade : opt bool;
+};
+
 type Result = variant { Ok; Err : text };
 type ResolveResult = variant { Ok : Resolved; Err : text };
 
@@ -48,6 +78,8 @@ service : {
   // handles: <handle> in <handle>/<label>; free, permanent, first come
   register_handle : (text) -> (Result);
   handle_owner : (text) -> (opt principal) query;
+  get_handle : (text) -> (opt Handle) query;
+  set_handle_deployer : (text, opt principal) -> (Result);
 
   // records, owner only
   set_record : (text, Target) -> (Result);
@@ -58,4 +90,14 @@ service : {
   get_record : (text) -> (opt Record) query;
   list_names : (text) -> (vec text) query;
   resolve : (text) -> (ResolveResult) query;
+
+  // deployers: controllers list them; a listed deployer may announce
+  add_deployer : (principal) -> (Result);
+  remove_deployer : (principal) -> (Result);
+  list_deployers : () -> (vec principal) query;
+  announce : (Announcement) -> (Result);
+
+  // stage 1 gateway: /<name> -> 302, /api/resolve/<name> -> JSON
+  http_request : (HttpRequest) -> (HttpResponse) query;
+  http_request_update : (HttpRequest) -> (HttpResponse);
 }
