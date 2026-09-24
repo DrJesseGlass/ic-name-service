@@ -19,17 +19,29 @@ use store::{Handle, Record, Target};
 
 #[ic_cdk::init]
 fn init() {
+    store::set_schema_version(store::SCHEMA);
     certify::rebuild();
-    directory::rebuild();
 }
 
-/// The certified tree is heap state and must be rebuilt. The tag index is
-/// stable memory kept in step on every write, so it is not: a rebuild here
-/// would decode every record a second time for nothing. A future change to
-/// what the index contains calls directory::rebuild once, explicitly.
+/// The certified tree is heap state and is rebuilt on every upgrade. The
+/// tag index is stable memory kept in step on every write, so it is only
+/// rebuilt when the schema version says the stored data predates it (an
+/// M0 canister had tags text records and no index). A newer schema than
+/// this code knows is refused rather than misread.
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
+    let from = store::schema_version();
+    if from > store::SCHEMA {
+        ic_cdk::trap(format!(
+            "stable memory schema {from} is newer than this code's {}",
+            store::SCHEMA
+        ));
+    }
     certify::rebuild();
+    if from < 2 {
+        directory::rebuild();
+    }
+    store::set_schema_version(store::SCHEMA);
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -300,6 +312,11 @@ fn search(query: SearchQuery) -> SearchResult {
 #[ic_cdk::query]
 fn tags() -> Vec<TagCount> {
     directory::tags()
+}
+
+#[ic_cdk::query]
+fn schema_version() -> u32 {
+    store::schema_version()
 }
 
 // --- resolve ----------------------------------------------------------------

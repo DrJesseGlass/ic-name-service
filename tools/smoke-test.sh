@@ -169,10 +169,12 @@ echo "$json" | grep >/dev/null '"updated_ns":"[0-9]*"' || { echo "api search tim
 json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/tags")
 echo "$json" | grep >/dev/null '"tag":"deploy"' || { echo "api tags wrong:"; echo "$json"; exit 1; }
 
-echo "--- upgrade keeps records and re-certifies"
+echo "--- upgrade keeps records, re-certifies, and lands on the current schema"
 dfx deploy --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
 out=$(call resolve "(\"$handle/app\")")
 echo "$out" | grep >/dev/null "canister = principal \"$target\"" || { echo "record lost across upgrade"; exit 1; }
 echo "$out" | grep >/dev/null 'certificate = opt blob' || { echo "no certificate after upgrade"; exit 1; }
+call schema_version | grep >/dev/null '(2 : nat32)' || { echo "schema not at 2 after upgrade"; exit 1; }
+call search "(record { tag = opt \"deploy\" })" | grep >/dev/null "$handle/app" || { echo "tag index lost across upgrade"; exit 1; }
 
 echo "SMOKE OK"

@@ -122,6 +122,8 @@ service : {
   // directory
   search : (SearchQuery) -> (SearchResult) query;
   tags : () -> (vec TagCount) query;
+  // stable memory layout version (store.rs SCHEMA); migrations key on it
+  schema_version : () -> (nat32) query;
 
   // deployers: controllers list them; a listed deployer may announce
   add_deployer : (principal) -> (Result);
