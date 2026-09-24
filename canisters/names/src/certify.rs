@@ -22,7 +22,7 @@ const LABEL: &[u8] = b"names";
 pub const MAX_ALIAS_DEPTH: usize = 8;
 
 thread_local! {
-    static TREE: RefCell<RbTree<Vec<u8>, Vec<u8>>> = RefCell::new(RbTree::new());
+    static TREE: RefCell<RbTree<Vec<u8>, Vec<u8>>> = const { RefCell::new(RbTree::new()) };
 }
 
 fn root_hash() -> [u8; 32] {
