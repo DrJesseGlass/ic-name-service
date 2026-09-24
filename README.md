@@ -70,9 +70,9 @@ in the deploy status without failing the deploy.
 
 A registry answers "where is X"; the directory answers "what exists".
 Tags come from the `tags` text record: comma separated, no spaces, each
-tag in the handle grammar, at most 16. A stable-memory index keyed by tag
-answers `search` by tag with a range scan; a substring query over names
-and descriptions is a pass over all records, which is right at any size
+tag in the handle grammar, at most 16. A stable-memory index keyed by tag,
+kept in step on every write, answers `search` by tag with a range scan; a
+substring query over names and descriptions is a pass over all records, which is right at any size
 this canister will see before delegation. Hits carry the description, the
 tags and the provenance text records (repo, commit, module_hash) that
 announce fills in. `/api/search?q=&tag=&offset=&limit=` and `/api/tags`
@@ -91,12 +91,12 @@ the announced code fails verification instead of silently routing.
     GET /api/tags                      tags in use with counts
     GET /                              usage
 
-HTTP responses are not certified yet. The redirect and the index ask the
-gateway to upgrade the call to an update, so they work on any domain. The
-JSON endpoint cannot, because the certificate inside the body only exists
-in a query, so it is served as a plain query: use a `raw` gateway domain or
-a direct replica request, and verify the body. Certifying the HTTP
-responses themselves is the M1 follow-up.
+HTTP responses are not certified yet. The redirect, the index, search and
+tags ask the gateway to upgrade the call to an update, so they work on any
+domain. The resolve JSON endpoint cannot, because the certificate inside
+the body only exists in a query, so it is served as a plain query: use a
+`raw` gateway domain or a direct replica request, and verify the body.
+Certifying the HTTP responses themselves is the M1 follow-up.
 
 ## Certified resolution
 

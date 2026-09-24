@@ -84,13 +84,16 @@ fn percent_decode(s: &str) -> String {
         match bytes[i] {
             b'+' => out.push(b' '),
             b'%' if i + 2 < bytes.len() => {
-                let hex = &s[i + 1..i + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(b) => {
-                        out.push(b);
+                // Two hex digits, checked byte by byte: slicing `s` here
+                // would panic when a multibyte character follows the '%',
+                // and from_str_radix would accept a leading '+'.
+                let digit = |b: u8| (b as char).to_digit(16);
+                match (digit(bytes[i + 1]), digit(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => {
+                        out.push((hi * 16 + lo) as u8);
                         i += 2;
                     }
-                    Err(_) => out.push(b'%'),
+                    _ => out.push(b'%'),
                 }
             }
             b => out.push(b),
@@ -120,12 +123,15 @@ pub fn handle(req: &HttpRequest, in_update: bool) -> HttpResponse {
     if let Some(name) = path.strip_prefix("/api/resolve/") {
         return api_resolve(name.trim_end_matches('/'));
     }
+    // Nothing in these bodies needs a query context, so like the index and
+    // the redirect they ask for the upgrade: a verifying gateway then
+    // accepts the (uncertified) response.
     if path == "/api/search" || path == "/api/search/" {
-        return api_search(&query_of(&req.url));
+        return api_search(&query_of(&req.url), !in_update);
     }
     if path == "/api/tags" || path == "/api/tags/" {
         let body = serde_json::to_vec(&crate::directory::tags()).expect("json");
-        return response(200, "application/json", body, false);
+        return response(200, "application/json", body, !in_update);
     }
     let name = path.trim_start_matches('/').trim_end_matches('/');
     match crate::follow(name) {
@@ -244,7 +250,7 @@ struct JsonSearch {
     hits: Vec<JsonHit>,
 }
 
-fn api_search(params: &[(String, String)]) -> HttpResponse {
+fn api_search(params: &[(String, String)], upgrade: bool) -> HttpResponse {
     let num = |k: &str| param(params, k).and_then(|v| v.parse::<u32>().ok());
     let result = crate::directory::search(crate::directory::SearchQuery {
         q: param(params, "q").map(str::to_string),
@@ -274,7 +280,7 @@ fn api_search(params: &[(String, String)]) -> HttpResponse {
             .collect(),
     };
     let body = serde_json::to_vec(&out).expect("json");
-    response(200, "application/json", body, false)
+    response(200, "application/json", body, upgrade)
 }
 
 #[cfg(test)]
@@ -290,6 +296,11 @@ mod tests {
         assert_eq!(param(&q, "offset"), None);
         assert!(query_of("/api/search").is_empty());
         assert_eq!(percent_decode("a+b%2Fc%zz"), "a b/c%zz");
+        // A multibyte character right after a '%' must not panic, and a
+        // sign is not a hex digit (the '+' then decodes as a space).
+        assert_eq!(percent_decode("%a\u{e9}"), "%a\u{e9}");
+        assert_eq!(percent_decode("%+1"), "% 1");
+        assert_eq!(percent_decode("%41"), "A");
     }
 
     #[test]

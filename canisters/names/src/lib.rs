@@ -23,10 +23,13 @@ fn init() {
     directory::rebuild();
 }
 
+/// The certified tree is heap state and must be rebuilt. The tag index is
+/// stable memory kept in step on every write, so it is not: a rebuild here
+/// would decode every record a second time for nothing. A future change to
+/// what the index contains calls directory::rebuild once, explicitly.
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     certify::rebuild();
-    directory::rebuild();
 }
 
 // --- helpers ----------------------------------------------------------------

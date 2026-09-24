@@ -52,15 +52,10 @@ pub fn unindex(record: &Record) {
     });
 }
 
-/// Drop the index and refill it from RECORDS (post_upgrade).
+/// Drop the index and refill it from RECORDS. Not run on upgrade (the
+/// index is stable and maintained on every write); for a migration.
 pub fn rebuild() {
-    TAGS.with(|t| {
-        let mut t = t.borrow_mut();
-        let keys: Vec<String> = t.iter().map(|e| e.key().clone()).collect();
-        for k in keys {
-            t.remove(&k);
-        }
-    });
+    TAGS.with(|t| t.borrow_mut().clear_new());
     store::for_each_record(index);
 }
 
@@ -149,12 +144,12 @@ fn matches(r: &Record, q: &str) -> bool {
     }
     r.name.contains(q)
         || r.text("description")
-            .map(|d| d.to_ascii_lowercase().contains(q))
+            .map(|d| d.to_lowercase().contains(q))
             .unwrap_or(false)
 }
 
 pub fn search(query: SearchQuery) -> SearchResult {
-    let q = query.q.unwrap_or_default().trim().to_ascii_lowercase();
+    let q = query.q.unwrap_or_default().trim().to_lowercase();
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let mut total = 0u32;

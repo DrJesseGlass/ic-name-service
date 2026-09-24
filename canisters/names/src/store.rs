@@ -143,17 +143,17 @@ thread_local! {
 
     /// handle -> Handle
     static HANDLES: RefCell<StableBTreeMap<String, Handle, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_HANDLES))),
+        StableBTreeMap::init(memory(MEM_HANDLES)),
     );
 
     /// principal (raw bytes) -> unit. Membership is the value.
     static DEPLOYERS: RefCell<StableBTreeMap<Vec<u8>, (), Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_DEPLOYERS))),
+        StableBTreeMap::init(memory(MEM_DEPLOYERS)),
     );
 
     /// "<handle>/<label>" -> Record
     static RECORDS: RefCell<StableBTreeMap<String, Record, Memory>> = RefCell::new(
-        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MEM_RECORDS))),
+        StableBTreeMap::init(memory(MEM_RECORDS)),
     );
 }
 

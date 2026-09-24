@@ -131,11 +131,11 @@ out=$(call search "(record { q = opt \"SMOKE TEST\" })")
 echo "$out" | grep >/dev/null "$handle/app" || { echo "search by description failed:"; echo "$out"; exit 1; }
 echo "--- search by tag, paged"
 out=$(call search "(record { tag = opt \"smoke-$handle\"; limit = opt 1 })")
-echo "$out" | grep >/dev/null 'total = 1' || { echo "search by tag failed:"; echo "$out"; exit 1; }
+echo "$out" | grep >/dev/null 'total = 1 : nat32' || { echo "search by tag failed:"; echo "$out"; exit 1; }
 echo "--- retag drops the old tag"
 call set_text "(\"$handle/app\", \"tags\", opt \"deploy\")" | grep >/dev/null 'Ok'
 out=$(call search "(record { tag = opt \"smoke-$handle\" })")
-echo "$out" | grep >/dev/null 'total = 0' || { echo "old tag still indexed:"; echo "$out"; exit 1; }
+echo "$out" | grep >/dev/null 'total = 0 : nat32' || { echo "old tag still indexed:"; echo "$out"; exit 1; }
 echo "--- announce with the real module hash, then verifier check E passes"
 live=$(dfx canister info names | awk '/Module hash/{sub(/^0x/, "", $3); print $3}')
 call add_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
