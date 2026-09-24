@@ -5,6 +5,10 @@
       "type": "rust",
       "package": "name_canister",
       "candid": "canisters/names/names.did"
+    },
+    "cycles_ledger": {
+      "type": "pull",
+      "id": "um5iw-rqaaa-aaaaq-qaaba-cai"
     }
   },
   "defaults": {

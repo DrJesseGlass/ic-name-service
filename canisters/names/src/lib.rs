@@ -1,19 +1,23 @@
 //! ic-name-service: resolver plus registry for canisters (DESIGN.md).
 //!
-//! State of play: milestones M0 and M1. Scoped names only, address and
+//! State of play: milestones M0 to M2. Scoped names with address and
 //! alias targets, text records, certified `resolve`, `announce` gated by
-//! caller principal, the stage 1 HTTP gateway (path-based 302), and the
-//! directory: tags and search.
+//! caller principal, the stage 1 HTTP gateway (path-based 302), the
+//! directory (tags and search), and flat names under a Harberger tax paid
+//! in cycles through the cycles ledger.
 
 mod certify;
 mod directory;
 mod gateway;
+mod harberger;
+mod ledger;
 mod names;
 mod store;
 
 use candid::{CandidType, Principal};
 use directory::{SearchQuery, SearchResult, TagCount};
-use store::{Handle, Record, Target};
+use harberger::{Config as HarbergerConfig, Status};
+use store::{Handle, Harberger, Record, Target};
 
 // --- lifecycle --------------------------------------------------------------
 
@@ -69,6 +73,31 @@ fn authorize_handle(handle: &str) -> Result<Handle, String> {
 fn authorize(name: &str) -> Result<Principal, String> {
     let (handle, _) = names::split(name)?;
     Ok(authorize_handle(handle)?.owner)
+}
+
+/// The caller must own the flat name and it must not have lapsed. Returns
+/// the record settled to `now` (not yet stored) and its status.
+fn authorize_flat(name: &str, now: u64) -> Result<(Record, Status), String> {
+    names::check_flat(name)?;
+    let caller = caller()?;
+    let mut r = store::get_record(name).ok_or_else(|| format!("no record for '{name}'"))?;
+    if r.owner != caller {
+        return Err(format!("caller does not own '{name}'"));
+    }
+    let status = harberger::settle_record(&harberger::config(), &mut r, now);
+    if status == Status::Free {
+        return Err(format!("'{name}' has lapsed and is free to claim"));
+    }
+    Ok((r, status))
+}
+
+/// A flat name must alias a scoped name (DESIGN.md section 4), so a sale
+/// never changes what a scoped name means.
+fn check_flat_target(target: &Target) -> Result<(), String> {
+    match target {
+        Target::Alias(to) if names::is_scoped(to) => names::split(to).map(|_| ()),
+        _ => Err("a flat name must alias a scoped name".to_string()),
+    }
 }
 
 /// Controllers administer the deployer list.
@@ -230,9 +259,19 @@ fn announce(a: Announcement) -> Result<(), String> {
 
 // --- records ----------------------------------------------------------------
 
-/// Create or repoint a scoped name. Text records survive a repoint.
+/// Create or repoint a scoped name, or repoint a flat name the caller
+/// holds. Text records survive a repoint.
 #[ic_cdk::update]
 fn set_record(name: String, target: Target) -> Result<(), String> {
+    let now = ic_cdk::api::time();
+    if !names::is_scoped(&name) {
+        let (mut r, _) = authorize_flat(&name, now)?;
+        check_flat_target(&target)?;
+        r.target = target;
+        r.updated_ns = now;
+        commit(r);
+        return Ok(());
+    }
     let caller = authorize(&name)?;
     if let Target::Alias(to) = &target {
         names::split(to)?;
@@ -240,7 +279,6 @@ fn set_record(name: String, target: Target) -> Result<(), String> {
             return Err("a name may not alias itself".to_string());
         }
     }
-    let now = ic_cdk::api::time();
     let record = match store::get_record(&name) {
         Some(mut r) => {
             r.target = target;
@@ -256,9 +294,14 @@ fn set_record(name: String, target: Target) -> Result<(), String> {
 /// Set (Some) or clear (None) one text record on an existing name.
 #[ic_cdk::update]
 fn set_text(name: String, key: String, value: Option<String>) -> Result<(), String> {
-    authorize(&name)?;
+    let now = ic_cdk::api::time();
+    let mut record = if names::is_scoped(&name) {
+        authorize(&name)?;
+        store::get_record(&name).ok_or_else(|| format!("no record for '{name}'"))?
+    } else {
+        authorize_flat(&name, now)?.0
+    };
     names::check_text_key(&key)?;
-    let mut record = store::get_record(&name).ok_or_else(|| format!("no record for '{name}'"))?;
     record.text.retain(|(k, _)| *k != key);
     if let Some(v) = value {
         names::check_text_value(&v)?;
@@ -274,13 +317,25 @@ fn set_text(name: String, key: String, value: Option<String>) -> Result<(), Stri
         record.text.push((key, v));
         record.text.sort_by(|a, b| a.0.cmp(&b.0));
     }
-    record.updated_ns = ic_cdk::api::time();
+    record.updated_ns = now;
     commit(record);
     Ok(())
 }
 
+/// Remove a scoped name, or release a flat name: its unspent balance
+/// becomes a credit to the owner and the name is free at once.
 #[ic_cdk::update]
 fn delete_record(name: String) -> Result<(), String> {
+    if !names::is_scoped(&name) {
+        let (r, _) = authorize_flat(&name, ic_cdk::api::time())?;
+        if let Some(h) = &r.flat {
+            store::add_credit(&r.owner, h.balance);
+        }
+        store::delete_record(&name);
+        directory::unindex(&r);
+        certify::remove(&name);
+        return Ok(());
+    }
     authorize(&name)?;
     match store::delete_record(&name) {
         Some(old) => {
@@ -347,7 +402,13 @@ fn resolve(name: String) -> Result<Resolved, String> {
 /// record visited, requested name first. No certification: the gateway's
 /// redirect wants only the address.
 fn follow(name: &str) -> Result<(Principal, Vec<Record>), String> {
-    names::split(name)?;
+    if names::is_scoped(name) {
+        names::split(name)?;
+    } else {
+        names::check_flat(name)?;
+    }
+    let cfg = harberger::config();
+    let now = ic_cdk::api::time();
     let mut chain: Vec<Record> = Vec::new();
     let mut current = name.to_string();
     let canister = loop {
@@ -362,6 +423,14 @@ fn follow(name: &str) -> Result<(Principal, Vec<Record>), String> {
         }
         let record =
             store::get_record(&current).ok_or_else(|| format!("no record for '{current}'"))?;
+        // A lapsed flat name does not resolve. The stored record goes into
+        // the chain unsettled, since that is what the witness leaf holds.
+        if let Some(h) = &record.flat {
+            let (status, _) = harberger::settle(&cfg, &mut h.clone(), now);
+            if status == Status::Free {
+                return Err(format!("'{current}' has lapsed and is free to claim"));
+            }
+        }
         let next = record.target.clone();
         chain.push(record);
         match next {
@@ -385,6 +454,328 @@ fn resolve_inner(name: String) -> Result<Resolved, String> {
         certificate: ic_cdk::api::data_certificate(),
         witness,
     })
+}
+
+// --- flat names under the Harberger tax (DESIGN.md section 5) ---------------
+//
+// Every payment is an ICRC-2 pull from the caller's cycles ledger account,
+// which is an await. State can change while a pull is in flight, so each
+// method validates, pulls, re-reads, and if the record moved underneath it
+// credits the payer back and fails. Nothing is written before the pull.
+
+#[derive(CandidType)]
+struct FlatStatus {
+    name: String,
+    owner: Principal,
+    target: Target,
+    price: u128,
+    /// Settled to now.
+    balance: u128,
+    status: Status,
+    tax_per_year: u128,
+    /// The least a claim or buy at `price` must deposit.
+    min_deposit: u128,
+    changed_hands_ns: u64,
+}
+
+#[ic_cdk::query]
+fn flat_status(name: String) -> Option<FlatStatus> {
+    let cfg = harberger::config();
+    let mut r = store::get_record(&name)?;
+    let h = r.flat.as_mut()?;
+    let (status, _) = harberger::settle(&cfg, h, ic_cdk::api::time());
+    Some(FlatStatus {
+        name: r.name.clone(),
+        owner: r.owner,
+        target: r.target.clone(),
+        price: h.price,
+        balance: h.balance,
+        status,
+        tax_per_year: harberger::tax_per_year(&cfg, h.price),
+        min_deposit: harberger::min_deposit(&cfg, h.price),
+        changed_hands_ns: r.changed_hands_ns,
+    })
+}
+
+fn check_price(cfg: &HarbergerConfig, price: u128) -> Result<(), String> {
+    if price < cfg.min_price {
+        return Err(format!(
+            "price below the minimum of {} cycles",
+            cfg.min_price
+        ));
+    }
+    if price > harberger::MAX_PRICE {
+        return Err(format!(
+            "price above the maximum of {} cycles",
+            harberger::MAX_PRICE
+        ));
+    }
+    Ok(())
+}
+
+fn check_deposit(cfg: &HarbergerConfig, price: u128, deposit: u128) -> Result<(), String> {
+    let min = harberger::min_deposit(cfg, price);
+    if deposit < min {
+        return Err(format!(
+            "deposit must cover one grace period of tax: at least {min} cycles at this price"
+        ));
+    }
+    Ok(())
+}
+
+/// Take a free flat name: unclaimed, or lapsed past its grace period.
+/// Pulls `deposit` from the caller. The name aliases `alias_to`.
+#[ic_cdk::update]
+async fn claim(name: String, alias_to: String, price: u128, deposit: u128) -> Result<(), String> {
+    let cfg = harberger::config();
+    let caller = caller()?;
+    names::check_flat(&name)?;
+    let target = Target::Alias(alias_to);
+    check_flat_target(&target)?;
+    check_price(&cfg, price)?;
+    check_deposit(&cfg, price, deposit)?;
+    let now = ic_cdk::api::time();
+    let snapshot = |r: Option<Record>| -> Result<Option<(Principal, u64)>, String> {
+        match r {
+            None => Ok(None),
+            Some(mut r) => {
+                let status = harberger::settle_record(&cfg, &mut r, now);
+                if r.flat.is_none() || status != Status::Free {
+                    return Err(format!("'{name}' is owned by {}", r.owner.to_text()));
+                }
+                Ok(Some((r.owner, r.changed_hands_ns)))
+            }
+        }
+    };
+    let before = snapshot(store::get_record(&name))?;
+
+    ledger::pull(cfg.ledger, caller, deposit).await?;
+
+    let existing = store::get_record(&name);
+    let after = snapshot(existing.clone());
+    if after.as_ref().ok() != Some(&before) {
+        store::add_credit(&caller, deposit);
+        return Err(format!(
+            "'{name}' changed hands while paying; deposit credited back"
+        ));
+    }
+    let now = ic_cdk::api::time();
+    let mut r = match existing {
+        Some(old) => Record {
+            owner: caller,
+            target,
+            text: Vec::new(),
+            updated_ns: now,
+            changed_hands_ns: now,
+            ..old
+        },
+        None => Record::new(name, caller, target, now),
+    };
+    r.flat = Some(Harberger {
+        price,
+        balance: deposit,
+        settled_ns: now,
+        lapsed_ns: None,
+    });
+    commit(r);
+    Ok(())
+}
+
+/// Buy a held flat name at its assessed price. Pulls price plus `deposit`
+/// from the caller; the seller is credited the price and the unspent
+/// balance. The buyer assesses `price` for the name from here on.
+#[ic_cdk::update]
+async fn buy(name: String, alias_to: String, price: u128, deposit: u128) -> Result<(), String> {
+    let cfg = harberger::config();
+    let caller = caller()?;
+    names::check_flat(&name)?;
+    let target = Target::Alias(alias_to);
+    check_flat_target(&target)?;
+    check_price(&cfg, price)?;
+    check_deposit(&cfg, price, deposit)?;
+    let now = ic_cdk::api::time();
+    let snapshot = |r: Option<Record>| -> Result<(Principal, u128, u64), String> {
+        let mut r = r.ok_or_else(|| format!("no record for '{name}'"))?;
+        let status = harberger::settle_record(&cfg, &mut r, now);
+        let h = r
+            .flat
+            .as_ref()
+            .ok_or_else(|| format!("'{name}' is not a flat name"))?;
+        if status == Status::Free {
+            return Err(format!("'{name}' has lapsed; claim it instead"));
+        }
+        if r.owner == caller {
+            return Err("you hold this name; use set_price".to_string());
+        }
+        Ok((r.owner, h.price, r.changed_hands_ns))
+    };
+    let before = snapshot(store::get_record(&name))?;
+    let total = before.1.saturating_add(deposit);
+
+    ledger::pull(cfg.ledger, caller, total).await?;
+
+    let mut r = store::get_record(&name)
+        .unwrap_or_else(|| Record::new(name.clone(), caller, target.clone(), now));
+    if snapshot(Some(r.clone())).ok() != Some(before) {
+        store::add_credit(&caller, total);
+        return Err(format!(
+            "'{name}' changed while paying; payment credited back"
+        ));
+    }
+    let now = ic_cdk::api::time();
+    harberger::settle_record(&cfg, &mut r, now);
+    let unspent = r.flat.as_ref().map(|h| h.balance).unwrap_or(0);
+    store::add_credit(&r.owner, before.1.saturating_add(unspent));
+    r.owner = caller;
+    r.target = target;
+    r.text.clear();
+    r.updated_ns = now;
+    r.changed_hands_ns = now;
+    r.flat = Some(Harberger {
+        price,
+        balance: deposit,
+        settled_ns: now,
+        lapsed_ns: None,
+    });
+    commit(r);
+    Ok(())
+}
+
+/// Add prepaid tax to a held flat name. Anyone may pay; a name in grace
+/// comes back to active.
+#[ic_cdk::update]
+async fn deposit(name: String, amount: u128) -> Result<(), String> {
+    let cfg = harberger::config();
+    let caller = caller()?;
+    names::check_flat(&name)?;
+    if amount == 0 {
+        return Err("amount is zero".to_string());
+    }
+    let now = ic_cdk::api::time();
+    let check = |r: Option<Record>| -> Result<(Principal, u64), String> {
+        let mut r = r.ok_or_else(|| format!("no record for '{name}'"))?;
+        let status = harberger::settle_record(&cfg, &mut r, now);
+        if r.flat.is_none() {
+            return Err(format!("'{name}' is not a flat name"));
+        }
+        if status == Status::Free {
+            return Err(format!("'{name}' has lapsed; claim it instead"));
+        }
+        Ok((r.owner, r.changed_hands_ns))
+    };
+    let before = check(store::get_record(&name))?;
+
+    ledger::pull(cfg.ledger, caller, amount).await?;
+
+    let now = ic_cdk::api::time();
+    let mut r = store::get_record(&name)
+        .unwrap_or_else(|| Record::new(name.clone(), caller, Target::Alias(String::new()), now));
+    if check(Some(r.clone())).ok() != Some(before) {
+        store::add_credit(&caller, amount);
+        return Err(format!(
+            "'{name}' changed while paying; amount credited back"
+        ));
+    }
+    harberger::settle_record(&cfg, &mut r, now);
+    if let Some(h) = r.flat.as_mut() {
+        h.balance = h.balance.saturating_add(amount);
+        h.lapsed_ns = None;
+        h.settled_ns = now;
+    }
+    r.updated_ns = now;
+    commit(r);
+    Ok(())
+}
+
+/// Reassess a held flat name. Tax from here on is at the new price.
+#[ic_cdk::update]
+fn set_price(name: String, price: u128) -> Result<(), String> {
+    let cfg = harberger::config();
+    check_price(&cfg, price)?;
+    let now = ic_cdk::api::time();
+    let (mut r, _) = authorize_flat(&name, now)?;
+    if let Some(h) = r.flat.as_mut() {
+        h.price = price;
+    }
+    r.updated_ns = now;
+    commit(r);
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn credit(p: Principal) -> u128 {
+    store::credit_of(&p)
+}
+
+/// The cycles ledger's transfer fee, paid by this canister on a withdraw.
+const LEDGER_FEE: u128 = 100_000_000;
+
+/// Move `amount` of the caller's credit (sale proceeds, refunds) to the
+/// caller's cycles ledger account. The ledger fee comes out of it.
+#[ic_cdk::update]
+async fn withdraw(amount: u128) -> Result<u128, String> {
+    let cfg = harberger::config();
+    let caller = caller()?;
+    if amount <= LEDGER_FEE {
+        return Err(format!(
+            "amount must exceed the ledger fee of {LEDGER_FEE} cycles"
+        ));
+    }
+    store::take_credit(&caller, amount)?;
+    match ledger::pay(cfg.ledger, caller, amount - LEDGER_FEE).await {
+        Ok(block) => Ok(block),
+        Err(e) => {
+            store::add_credit(&caller, amount);
+            Err(e)
+        }
+    }
+}
+
+#[derive(CandidType)]
+struct Treasury {
+    /// Tax settled so far, cycles. Sits in this canister's ledger account
+    /// alongside prepaid balances and credits, which it must never touch.
+    collected: u128,
+    withdrawn: u128,
+}
+
+#[ic_cdk::query]
+fn treasury() -> Treasury {
+    Treasury {
+        collected: harberger::tax_collected(),
+        withdrawn: harberger::tax_withdrawn(),
+    }
+}
+
+/// Turn collected tax into this canister's own cycles (DESIGN.md section
+/// 5: the tax funds the canister's operation). Controllers only.
+#[ic_cdk::update]
+async fn fund_self(amount: u128) -> Result<u128, String> {
+    admin()?;
+    let cfg = harberger::config();
+    let available = harberger::tax_collected().saturating_sub(harberger::tax_withdrawn());
+    if amount == 0 || amount > available {
+        return Err(format!("{available} cycles of tax available to withdraw"));
+    }
+    harberger::note_tax_withdrawn(amount);
+    match ledger::fund_self(cfg.ledger, amount).await {
+        Ok(block) => Ok(block),
+        Err(e) => {
+            harberger::undo_tax_withdrawn(amount);
+            Err(e)
+        }
+    }
+}
+
+#[ic_cdk::update]
+fn set_harberger_config(c: HarbergerConfig) -> Result<(), String> {
+    admin()?;
+    harberger::set_config(c)
+}
+
+#[ic_cdk::query]
+fn harberger_config() -> HarbergerConfig {
+    harberger::config()
 }
 
 // --- HTTP gateway, stage 1 (DESIGN.md section 6) -----------------------------

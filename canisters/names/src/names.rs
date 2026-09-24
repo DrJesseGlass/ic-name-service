@@ -31,6 +31,23 @@ pub fn check_segment(what: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Names that can never be flat names: they are gateway routes.
+const RESERVED_FLAT: &[&str] = &["api"];
+
+/// A flat name (DESIGN.md section 4): one segment, no '/'.
+pub fn check_flat(name: &str) -> Result<(), String> {
+    check_segment("flat name", name)?;
+    if RESERVED_FLAT.contains(&name) {
+        return Err(format!("'{name}' is reserved"));
+    }
+    Ok(())
+}
+
+/// True for `<handle>/<label>`, false for a flat name. Errors on neither.
+pub fn is_scoped(name: &str) -> bool {
+    name.contains('/')
+}
+
 /// Split and validate a scoped name into (handle, label).
 pub fn split(name: &str) -> Result<(&str, &str), String> {
     let (handle, label) = name
@@ -113,6 +130,15 @@ pub fn check_hex(what: &str, s: &str, byte_lens: &[usize]) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flat() {
+        assert!(check_flat("ic-git").is_ok());
+        assert!(check_flat("api").is_err());
+        assert!(check_flat("alice/ic-git").is_err());
+        assert!(is_scoped("alice/ic-git"));
+        assert!(!is_scoped("ic-git"));
+    }
 
     #[test]
     fn tags() {

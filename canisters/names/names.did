@@ -23,6 +23,15 @@ type Target = variant {
   alias : text;
 };
 
+// Harberger state of a flat name (DESIGN.md section 5), cycles. balance
+// is as of settled_ns; the canister settles lazily on every read and write.
+type Harberger = record {
+  price : nat;
+  balance : nat;
+  settled_ns : nat64;
+  lapsed_ns : opt nat64;
+};
+
 type Record = record {
   name : text;
   owner : principal;
@@ -31,6 +40,9 @@ type Record = record {
   created_ns : nat64;
   updated_ns : nat64;
   changed_hands_ns : nat64;
+  // Present on flat names only. Adds four lines to the canonical form:
+  //   price=<nat>\n balance=<nat>\n settled_ns=<u64>\n lapsed_ns=<u64 or 0>\n
+  flat : opt Harberger;
 };
 
 type Resolved = record {
@@ -99,8 +111,36 @@ type SearchResult = record {
 
 type TagCount = record { tag : text; count : nat32 };
 
+type Status = variant {
+  active;
+  grace : record { until_ns : nat64 };  // balance gone; owner keeps it until then
+  free;                                 // anyone may claim
+};
+
+type FlatStatus = record {
+  name : text;
+  owner : principal;
+  target : Target;
+  price : nat;
+  balance : nat;         // settled to now
+  status : Status;
+  tax_per_year : nat;
+  min_deposit : nat;     // least deposit for a claim or buy at this price
+  changed_hands_ns : nat64;
+};
+
+type HarbergerConfig = record {
+  ledger : principal;    // the cycles ledger (ICRC-2)
+  rate_bps : nat32;      // tax per year on the price, basis points
+  min_price : nat;       // cycles
+  grace_ns : nat64;
+};
+
+type Treasury = record { collected : nat; withdrawn : nat };
+
 type Result = variant { Ok; Err : text };
 type ResolveResult = variant { Ok : Resolved; Err : text };
+type NatResult = variant { Ok : nat; Err : text };
 
 service : {
   // handles: <handle> in <handle>/<label>; free, permanent, first come
@@ -118,6 +158,20 @@ service : {
   get_record : (text) -> (opt Record) query;
   list_names : (text) -> (vec text) query;
   resolve : (text) -> (ResolveResult) query;
+
+  // flat names (DESIGN.md section 5). Payments are ICRC-2 pulls from the
+  // caller's cycles ledger account: approve this canister first.
+  claim : (text, text, nat, nat) -> (Result);      // name, alias_to, price, deposit
+  buy : (text, text, nat, nat) -> (Result);        // name, alias_to, price, deposit
+  deposit : (text, nat) -> (Result);               // name, amount
+  set_price : (text, nat) -> (Result);
+  flat_status : (text) -> (opt FlatStatus) query;
+  credit : (principal) -> (nat) query;             // sale proceeds and refunds owed
+  withdraw : (nat) -> (NatResult);                 // credit -> caller's ledger account
+  treasury : () -> (Treasury) query;
+  fund_self : (nat) -> (NatResult);                // controllers: tax -> own cycles
+  set_harberger_config : (HarbergerConfig) -> (Result);
+  harberger_config : () -> (HarbergerConfig) query;
 
   // directory
   search : (SearchQuery) -> (SearchResult) query;

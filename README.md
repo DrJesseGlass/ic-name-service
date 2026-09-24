@@ -4,11 +4,12 @@ A resolver plus registry for canisters on the Internet Computer. A caller
 asks for a name and gets a canister id plus a subnet certificate, then talks
 to the target directly. Design brief: DESIGN.md.
 
-State: milestones M0 and M1 (DESIGN.md section 10). Scoped names
+State: milestones M0 to M2 (DESIGN.md section 10). Scoped names
 (`<handle>/<label>`), address and alias targets, text records, certified
 `resolve` with an independent verifier, `announce` gated by caller
-principal, the stage 1 HTTP gateway, the ic-git hook, and the directory:
-tags and search. Not yet deployed; deployment will go through ic-git.
+principal, the stage 1 HTTP gateway, the ic-git hook, the directory (tags
+and search), and flat names under a Harberger tax paid in cycles. Not yet
+deployed; deployment will go through ic-git.
 
 ## Layout
 
@@ -19,6 +20,8 @@ tags and search. Not yet deployed; deployment will go through ic-git.
       src/store.rs           stable-memory handles, records, deployer list
       src/certify.rs         hash tree over records, certified data, witnesses
       src/directory.rs       tag index and search
+      src/harberger.rs       tax arithmetic, lazy settlement, config
+      src/ledger.rs          cycles ledger client (ICRC-1, ICRC-2)
       src/gateway.rs         HTTP: /<name> -> 302, /api/* -> JSON
     tools/verify/            independent verifier of a resolve answer (own
                              cargo workspace; uses ic-agent)
@@ -41,6 +44,12 @@ tags and search. Not yet deployed; deployment will go through ic-git.
     add_deployer / remove_deployer : (principal) -> (Result) controllers only
     list_deployers  : () -> (vec principal) query
     announce        : (Announcement) -> (Result)            listed deployers only
+    claim / buy     : (text, text, nat, nat) -> (Result)     flat name, alias_to, price, deposit
+    deposit         : (text, nat) -> (Result)               top up a flat name
+    set_price       : (text, nat) -> (Result)               reassess a held flat name
+    flat_status     : (text) -> (opt FlatStatus) query      settled to now
+    credit / withdraw                                       proceeds owed, paid out on request
+    treasury / fund_self                                    tax collected; controllers move it
     search          : (SearchQuery) -> (SearchResult) query  substring and tag, paged
     tags            : () -> (vec TagCount) query
     http_request    : (HttpRequest) -> (HttpResponse) query
@@ -65,6 +74,31 @@ The ic-git side is one optional module (canisters/git/src/names.rs there)
 behind `names_set_config(canister, handle)`: every repo of that instance is
 announced as `<handle>/<repo>`, and a refused or failed announce is noted
 in the deploy status without failing the deploy.
+
+## Flat names and the Harberger tax
+
+A flat name (`ic-git`, one segment) is scarce and marketable. It always
+aliases a scoped name, so a sale never changes what the scoped identity
+means. The holder self-assesses a price and prepays a balance in cycles;
+tax accrues on the price at the configured rate (7 percent a year by
+default) and is settled lazily on every read and write, with no timers.
+Anyone may buy the name at the assessed price at any time. The seller is
+credited the price plus the unspent balance and withdraws it to the cycles
+ledger when they like. When the balance runs out the name enters a grace
+period (30 days by default), after which it is free to claim.
+
+Payments are ICRC-2 pulls from the caller's cycles ledger account, so a
+caller first approves this canister as a spender for the amount plus the
+ledger fee. A claim or buy must deposit at least one grace period of tax
+at the assessed price, so a name is never held on credit. There is a
+minimum price and a maximum, and a reserved name list (`api`). Collected
+tax stays in this canister's ledger account until a controller moves it
+into the canister's own cycles with `fund_self`; prepaid balances and
+credits in the same account are never touched.
+
+Every payment method validates, pulls, then re-reads the record, and if
+the name changed hands during the pull it credits the payer back and
+fails, so two buyers racing for one name cannot both pay.
 
 ## Directory
 
@@ -131,6 +165,7 @@ key and is never correct against mainnet.
 
     cargo test -p name_canister        unit tests, native
     dfx start --background             a local replica
+    dfx deps deploy                    the cycles ledger, for the flat name tests
     tools/smoke-test.sh                deploy, register, resolve, verify,
                                        announce, gateway, upgrade
     tools/reproducible-build.sh        native build, prints the module sha256
