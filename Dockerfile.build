@@ -1,0 +1,75 @@
+# Reproducible build for the names canister. Same recipe as ic-git.
+#
+# Pins every input that affects the output wasm so anyone, on any machine,
+# builds a byte-identical artifact whose sha256 equals the module hash the IC
+# reports for the deployed canister. A match proves the running code is
+# exactly this source, with no trust in the deployer.
+#
+#   docker build -f Dockerfile.build -t ic-name-service-build .
+#   docker run --rm ic-name-service-build     # prints the module sha256
+#
+# tools/reproducible-build.sh wraps this and diffs against the on-chain hash.
+# Every pin here is part of the output hash.
+
+# Matches rust-toolchain.toml (channel 1.94.1). The platform is pinned because
+# the host triple reaches the artifact through the toolchain's own paths and
+# dependency resolution, so an arm64 and an amd64 rebuild are not the same
+# build. BASE_IMAGE is an override point: pass a digest
+# (rust:1.94.1-slim-bookworm@sha256:...) to pin the base image exactly.
+ARG BASE_IMAGE=rust:1.94.1-slim-bookworm
+FROM --platform=linux/amd64 ${BASE_IMAGE}
+
+# dfx's bundled ic-wasm post-processes the module (shrink + candid/dfx
+# metadata) into the exact artifact installed on-chain, so its version is part
+# of the output hash.
+ARG DFX_VERSION=0.31.0
+ENV DFXVM_INIT_YES=true
+
+# CARGO_HOME and RUSTUP_HOME are deliberately NOT overridden: the rust:*-slim
+# base installs its toolchain under /usr/local/rustup and /usr/local/cargo,
+# and pointing them elsewhere hides the pinned toolchain from rustup. The
+# path normalization that keeps those locations out of the wasm lives in
+# tools/build-env.sh, sourced below and by tools/reproducible-build.sh.
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add wasm32-unknown-unknown
+
+# Pinned dfx. This is a live network fetch of an installer script, so the exact
+# bytes are not pinned by this file; DFX_VERSION pins what it installs.
+RUN DFX_VERSION=${DFX_VERSION} sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)"
+ENV PATH=/root/.local/share/dfx/bin:${PATH}
+
+# A fixed build path so no host-specific source path leaks into the wasm.
+WORKDIR /build
+COPY . .
+
+# `dfx build --check` runs the same cargo + ic-wasm pipeline as a mainnet
+# build but needs no network and no canister id, so this builds fully
+# offline. The canister id is not embedded in the module.
+#
+# The lockfile is enforced by `cargo fetch --locked` (CARGO_NET_LOCKED is not
+# a Cargo setting; see ic-git's Dockerfile.build for the measurement) and the
+# sha256 -c after the build catches any rewrite the preflight could not.
+RUN cargo fetch --locked --target wasm32-unknown-unknown \
+    && sha256sum Cargo.lock > /tmp/Cargo.lock.sha256 \
+    && . ./tools/build-env.sh \
+    && dfx build --check names \
+    && sha256sum -c /tmp/Cargo.lock.sha256 \
+    && cp .dfx/local/canisters/names/names.wasm name_canister.wasm \
+    && gzip -9 -n -c name_canister.wasm > name_canister.wasm.gz \
+    && sha256sum name_canister.wasm name_canister.wasm.gz | tee name_canister.wasm.sha256
+
+# The installed artifact is the GZIPPED module, as in ic-git: the IC reports
+# the module hash of the compressed bytes. `gzip -n` omits the timestamp and
+# name, so the .gz is as reproducible as the .wasm. The on-chain hash matches
+# the .gz line.
+#
+# Declared AFTER the build so it can never invalidate the build layer or reach
+# the wasm: it only records WHICH tree produced the hash above.
+ARG SOURCE_COMMIT=unknown
+LABEL org.opencontainers.image.revision=${SOURCE_COMMIT}
+
+CMD ["cat", "/build/name_canister.wasm.sha256"]

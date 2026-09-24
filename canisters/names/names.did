@@ -1,0 +1,61 @@
+// ic-name-service, milestone M0 (resolve). See DESIGN.md.
+//
+// Certified resolution: `resolve` returns the subnet certificate over this
+// canister's certified data and a CBOR hash tree witness. The tree is
+// labeled "names"; under it each scoped name is a leaf whose bytes are the
+// record's canonical form:
+//
+//   name=<name>\n
+//   owner=<principal>\n
+//   target=address:<principal>\n        or   target=alias:<name>\n
+//   text.<key>=<value>\n                (one per text record, sorted by key)
+//   created_ns=<u64>\n
+//   updated_ns=<u64>\n
+//   changed_hands_ns=<u64>\n
+//
+// A verifier checks the certificate against the IC root key, reads
+// /canister/<id>/certified_data from it, checks it equals the witness root,
+// then checks the leaf for each name in `chain` equals that record's
+// canonical form.
+
+type Target = variant {
+  address : principal;
+  alias : text;
+};
+
+type Record = record {
+  name : text;
+  owner : principal;
+  target : Target;
+  text : vec record { text; text };
+  created_ns : nat64;
+  updated_ns : nat64;
+  changed_hands_ns : nat64;
+};
+
+type Resolved = record {
+  name : text;
+  canister : principal;
+  chain : vec Record;
+  certificate : opt blob;
+  witness : blob;
+};
+
+type Result = variant { Ok; Err : text };
+type ResolveResult = variant { Ok : Resolved; Err : text };
+
+service : {
+  // handles: <handle> in <handle>/<label>; free, permanent, first come
+  register_handle : (text) -> (Result);
+  handle_owner : (text) -> (opt principal) query;
+
+  // records, owner only
+  set_record : (text, Target) -> (Result);
+  set_text : (text, text, opt text) -> (Result);
+  delete_record : (text) -> (Result);
+
+  // reads
+  get_record : (text) -> (opt Record) query;
+  list_names : (text) -> (vec text) query;
+  resolve : (text) -> (ResolveResult) query;
+}
