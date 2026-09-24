@@ -56,6 +56,12 @@ pub fn set_config(c: Config) -> Result<(), String> {
     if c.rate_bps > 10_000 {
         return Err("rate_bps above 10000 (100% per year)".to_string());
     }
+    if c.min_price > MAX_PRICE {
+        return Err(format!("min_price above the maximum price of {MAX_PRICE}"));
+    }
+    if c.grace_ns == 0 {
+        return Err("grace_ns is zero: every name would be free at once".to_string());
+    }
     store::meta_set(
         CONFIG_KEY,
         candid::encode_one(&c).map_err(|e| e.to_string())?,
@@ -137,21 +143,22 @@ pub fn settle(cfg: &Config, h: &mut Harberger, now: u64) -> (Status, u128) {
     (status, taken)
 }
 
-/// Settle a flat record in place, recording the tax taken in the treasury
-/// counter. Returns the status. A record that is not flat is Active.
-pub fn settle_record(cfg: &Config, r: &mut Record, now: u64) -> Status {
+/// Settle a flat record in place. Returns the status and the tax taken,
+/// which the caller reports with `note_tax_collected` when, and only
+/// when, it commits the settled record: the counter must track what the
+/// stored balances have actually given up. A record that is not flat is
+/// Active and owes nothing.
+pub fn settle_record(cfg: &Config, r: &mut Record, now: u64) -> (Status, u128) {
     match r.flat.as_mut() {
-        None => Status::Active,
-        Some(h) => {
-            let (status, taken) = settle(cfg, h, now);
-            if taken > 0 {
-                store::meta_set_u128(
-                    TAX_COLLECTED_KEY,
-                    store::meta_get_u128(TAX_COLLECTED_KEY).saturating_add(taken),
-                );
-            }
-            status
-        }
+        None => (Status::Active, 0),
+        Some(h) => settle(cfg, h, now),
+    }
+}
+
+/// Add tax that a committed settlement took to the treasury counter.
+pub fn note_tax_collected(taken: u128) {
+    if taken > 0 {
+        store::meta_set_u128(TAX_COLLECTED_KEY, tax_collected().saturating_add(taken));
     }
 }
 
@@ -176,6 +183,24 @@ pub fn note_tax_withdrawn(amount: u128) {
 /// A withdrawal that the ledger refused after it was noted.
 pub fn undo_tax_withdrawn(amount: u128) {
     store::meta_set_u128(TAX_WITHDRAWN_KEY, tax_withdrawn().saturating_sub(amount));
+}
+
+const UNRECONCILED_KEY: &str = "unreconciled";
+const UNRECONCILED_LAST_KEY: &str = "unreconciled_last";
+
+/// Cycles whose movement this canister could not confirm (ledger.rs,
+/// Failure::Undecodable), for the operator to reconcile against the
+/// ledger's blocks. Never spent against.
+pub fn unreconciled() -> (u128, String) {
+    let last = store::meta_get(UNRECONCILED_LAST_KEY)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    (store::meta_get_u128(UNRECONCILED_KEY), last)
+}
+
+pub fn note_unreconciled(amount: u128, what: &str) {
+    store::meta_set_u128(UNRECONCILED_KEY, unreconciled().0.saturating_add(amount));
+    store::meta_set(UNRECONCILED_LAST_KEY, what.as_bytes().to_vec());
 }
 
 #[cfg(test)]
@@ -266,6 +291,35 @@ mod tests {
         set_config(c.clone()).unwrap();
         assert_eq!(config(), c);
         c.rate_bps = 20_000;
+        assert!(set_config(c.clone()).is_err());
+        c.rate_bps = 500;
+        c.grace_ns = 0;
+        assert!(set_config(c.clone()).is_err());
+        c.grace_ns = 1;
+        c.min_price = MAX_PRICE + 1;
         assert!(set_config(c).is_err());
+    }
+
+    #[test]
+    fn tax_is_counted_only_when_noted() {
+        let c = cfg();
+        let mut r = Record::new(
+            "ic-git".into(),
+            candid::Principal::anonymous(),
+            crate::store::Target::Alias("alice/ic-git".into()),
+            0,
+        );
+        r.flat = Some(Harberger {
+            price: 1_000_000_000_000,
+            balance: 1_000_000_000_000,
+            settled_ns: 0,
+            lapsed_ns: None,
+        });
+        let before = tax_collected();
+        let (_, taken) = settle_record(&c, &mut r.clone(), YEAR_NS as u64);
+        assert_eq!(taken, tax_per_year(&c, 1_000_000_000_000));
+        assert_eq!(tax_collected(), before);
+        note_tax_collected(taken);
+        assert_eq!(tax_collected(), before + taken);
     }
 }

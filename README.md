@@ -90,11 +90,18 @@ period (30 days by default), after which it is free to claim.
 Payments are ICRC-2 pulls from the caller's cycles ledger account, so a
 caller first approves this canister as a spender for the amount plus the
 ledger fee. A claim or buy must deposit at least one grace period of tax
-at the assessed price, so a name is never held on credit. There is a
+at the assessed price, and a top-up must leave at least that much, so a
+name is never held on credit. There is a
 minimum price and a maximum, and a reserved name list (`api`). Collected
 tax stays in this canister's ledger account until a controller moves it
 into the canister's own cycles with `fund_self`; prepaid balances and
-credits in the same account are never touched.
+credits in the same account are never touched. A ledger reply this code
+cannot decode is not treated as "nothing moved": the amount is recorded
+as unreconciled in `treasury` for the operator to check against the
+ledger's blocks, and no credit is given back or paid twice. Tax is counted when a
+settled record is written, never on a read or a refused call, and every
+payout (withdraw, fund_self) takes the ledger fee out of the amount, so
+the counters match the account to the cycle.
 
 Every payment method validates, pulls, then re-reads the record, and if
 the name changed hands during the pull it credits the payer back and

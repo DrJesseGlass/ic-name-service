@@ -109,15 +109,49 @@ enum LedgerResult {
     Err(LedgerError),
 }
 
-async fn call(ledger: Principal, method: &str, arg: impl CandidType) -> Result<u128, String> {
+/// How a ledger call failed, and whether the cycles moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// The call was rejected: the ledger did not run it, or trapped. No
+    /// transfer happened, so the caller's own bookkeeping can be undone.
+    Rejected(String),
+    /// The ledger ran and answered Err. No transfer happened.
+    Refused(String),
+    /// The ledger ran and answered something this code cannot decode. The
+    /// transfer may well have happened. The caller must not undo its
+    /// bookkeeping; it records the amount as unreconciled instead.
+    Undecodable(String),
+}
+
+impl Failure {
+    /// True when it is certain no cycles moved.
+    pub fn nothing_moved(&self) -> bool {
+        !matches!(self, Failure::Undecodable(_))
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Failure::Rejected(m) | Failure::Refused(m) => m.clone(),
+            Failure::Undecodable(m) => format!(
+                "{m}; the transfer may have gone through, so nothing was undone and the amount is recorded as unreconciled for the operator"
+            ),
+        }
+    }
+}
+
+async fn call(ledger: Principal, method: &str, arg: impl CandidType) -> Result<u128, Failure> {
     let res = Call::unbounded_wait(ledger, method)
         .with_arg(arg)
         .await
-        .map_err(|e| format!("{method}: {e:?}"))?;
+        .map_err(|e| Failure::Rejected(format!("{method}: {e:?}")))?;
     match res.candid::<LedgerResult>() {
         Ok(LedgerResult::Ok(n)) => Ok(nat_to_u128(n)),
-        Ok(LedgerResult::Err(e)) => Err(format!("{method}: ledger refused: {e:?}")),
-        Err(e) => Err(format!("{method}: undecodable reply: {e}")),
+        Ok(LedgerResult::Err(e)) => {
+            Err(Failure::Refused(format!("{method}: ledger refused: {e:?}")))
+        }
+        Err(e) => Err(Failure::Undecodable(format!(
+            "{method}: undecodable reply: {e}"
+        ))),
     }
 }
 
@@ -131,7 +165,7 @@ fn nat_to_u128(n: Nat) -> u128 {
 
 /// Pull `amount` cycles from `payer` into this canister's ledger account.
 /// The payer must have approved at least amount plus the fee.
-pub async fn pull(ledger: Principal, payer: Principal, amount: u128) -> Result<u128, String> {
+pub async fn pull(ledger: Principal, payer: Principal, amount: u128) -> Result<u128, Failure> {
     call(
         ledger,
         "icrc2_transfer_from",
@@ -150,7 +184,7 @@ pub async fn pull(ledger: Principal, payer: Principal, amount: u128) -> Result<u
 
 /// Pay `amount` cycles from this canister's ledger account to `to`. The
 /// fee comes out of this canister's account on top.
-pub async fn pay(ledger: Principal, to: Principal, amount: u128) -> Result<u128, String> {
+pub async fn pay(ledger: Principal, to: Principal, amount: u128) -> Result<u128, Failure> {
     call(
         ledger,
         "icrc1_transfer",
@@ -168,7 +202,7 @@ pub async fn pay(ledger: Principal, to: Principal, amount: u128) -> Result<u128,
 
 /// Move `amount` cycles from this canister's ledger account into its own
 /// cycles balance.
-pub async fn fund_self(ledger: Principal, amount: u128) -> Result<u128, String> {
+pub async fn fund_self(ledger: Principal, amount: u128) -> Result<u128, Failure> {
     call(
         ledger,
         "withdraw",

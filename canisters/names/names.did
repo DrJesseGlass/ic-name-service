@@ -136,7 +136,13 @@ type HarbergerConfig = record {
   grace_ns : nat64;
 };
 
-type Treasury = record { collected : nat; withdrawn : nat };
+type Treasury = record {
+  collected : nat;
+  withdrawn : nat;
+  // cycles whose movement a ledger reply left unconfirmed; never spent
+  unreconciled : nat;
+  unreconciled_last : text;
+};
 
 type Result = variant { Ok; Err : text };
 type ResolveResult = variant { Ok : Resolved; Err : text };

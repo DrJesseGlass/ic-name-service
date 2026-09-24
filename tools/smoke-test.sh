@@ -201,24 +201,41 @@ before=$(bal "$me")
 call withdraw "(1_000_000_000_000)" | grep >/dev/null 'Ok'
 after=$(bal "$me")
 [ $((after - before)) -eq $((1000000000000 - 100000000)) ] || { echo "withdraw moved $((after - before)), expected 1T minus the fee"; exit 1; }
-echo "--- tax was collected and the controller can fund the canister from it"
-treasury_field() { call treasury | grep -o "$1 = [0-9_]*" | tr -d '_' | awk '{print $3}'; }
-collected=$(treasury_field collected)
-available=$((collected - $(treasury_field withdrawn)))
-[ "$available" -gt 0 ] || { echo "no tax available to withdraw (collected $collected)"; exit 1; }
-call fund_self "($((available + 1)))" | grep >/dev/null 'available to withdraw'
-call fund_self "($available)" | grep >/dev/null 'Ok'
-[ "$(treasury_field withdrawn)" = "$collected" ] || { echo "withdrawn != collected after fund_self"; call treasury; exit 1; }
 echo "--- a name whose deposit runs out lapses, then frees, then can be claimed"
+# At the maximum price (10^18) a 200B deposit is spent in about six seconds,
+# and the whole of it is tax: enough for fund_self to pay the ledger fee.
 lapse="fl$RANDOM"
-call claim "(\"$lapse\", \"$handle/app\", 1_000_000_000_000, 70_000)" | grep >/dev/null 'Ok'
-sleep 6
+call claim "(\"$lapse\", \"$handle/app\", 1_000_000_000_000_000_000, 200_000_000_000)" | grep >/dev/null 'Ok'
+sleep 10
 call flat_status "(\"$lapse\")" | grep >/dev/null 'status = variant { free }' || { echo "expected free after grace"; call flat_status "(\"$lapse\")"; exit 1; }
 call resolve "(\"$lapse\")" | grep >/dev/null 'has lapsed'
 call deposit "(\"$lapse\", 1_000_000)" | grep >/dev/null 'claim it instead'
 dfx canister call --identity smoke-other names claim "(\"$lapse\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'Ok'
+echo "--- tax was collected and the controller can fund the canister from it"
+treasury_field() { call treasury | grep -o "$1 = [0-9_]*" | tr -d '_' | awk '{print $3}'; }
+collected=$(treasury_field collected)
+available=$((collected - $(treasury_field withdrawn)))
+[ "$available" -gt 100000000 ] || { echo "not enough tax to withdraw past the ledger fee (collected $collected)"; exit 1; }
+call fund_self "($((available + 1)))" | grep >/dev/null 'available to withdraw'
+call fund_self "(1)" | grep >/dev/null 'exceed the ledger fee'
+call fund_self "($available)" | grep >/dev/null 'Ok'
+[ "$(treasury_field withdrawn)" = "$collected" ] || { echo "withdrawn != collected after fund_self"; call treasury; exit 1; }
 echo "--- top up keeps a name active; release refunds the balance as credit"
 dfx canister call --identity smoke-other names deposit "(\"$lapse\", 1_000_000_000)" | grep >/dev/null 'Ok'
+echo "--- a top-up must leave one grace period of tax: dust on an empty name is refused"
+# At the maximum price and 100 percent a year the tax is about 3.2e10 per
+# second. With an 8 second grace, a 12 second deposit lapses at 12 s and is
+# free at 20 s, so a check at about 14 s lands inside grace with room for
+# call latency on either side.
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 8_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+dust="fl$RANDOM"
+call claim "(\"$dust\", \"$handle/app\", 1_000_000_000_000_000_000, 380_000_000_000)" | grep >/dev/null 'Ok'
+sleep 13
+call flat_status "(\"$dust\")" | grep >/dev/null 'grace = record' || { echo "expected grace"; call flat_status "(\"$dust\")"; exit 1; }
+call deposit "(\"$dust\", 1_000)" | grep >/dev/null 'one grace period of tax'
+call deposit "(\"$dust\", 400_000_000_000)" | grep >/dev/null 'Ok'
+call flat_status "(\"$dust\")" | grep >/dev/null 'status = variant { active }'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 ocredit=$(call credit "(principal \"$other\")" | tr -d '_ ()nat:')
 dfx canister call --identity smoke-other names delete_record "(\"$lapse\")" | grep >/dev/null 'Ok'
 ocredit2=$(call credit "(principal \"$other\")" | tr -d '_ ()nat:')
