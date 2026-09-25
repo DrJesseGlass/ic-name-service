@@ -47,6 +47,14 @@ enum Target {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
+struct Harberger {
+    price: u128,
+    balance: u128,
+    settled_ns: u64,
+    lapsed_ns: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
 struct Record {
     name: String,
     owner: Principal,
@@ -55,6 +63,7 @@ struct Record {
     created_ns: u64,
     updated_ns: u64,
     changed_hands_ns: u64,
+    flat: Option<Harberger>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -81,6 +90,12 @@ fn canonical(r: &Record) -> Vec<u8> {
     s.push_str(&format!("created_ns={}\n", r.created_ns));
     s.push_str(&format!("updated_ns={}\n", r.updated_ns));
     s.push_str(&format!("changed_hands_ns={}\n", r.changed_hands_ns));
+    if let Some(h) = &r.flat {
+        s.push_str(&format!("price={}\n", h.price));
+        s.push_str(&format!("balance={}\n", h.balance));
+        s.push_str(&format!("settled_ns={}\n", h.settled_ns));
+        s.push_str(&format!("lapsed_ns={}\n", h.lapsed_ns.unwrap_or(0)));
+    }
     s.into_bytes()
 }
 

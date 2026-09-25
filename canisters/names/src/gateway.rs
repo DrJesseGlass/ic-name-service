@@ -152,8 +152,9 @@ pub fn handle(req: &HttpRequest, in_update: bool) -> HttpResponse {
 
 fn index() -> String {
     "ic-name-service\n\n\
-     GET /<handle>/<label>              redirect to the canister\n\
-     GET /api/resolve/<handle>/<label>  certified answer as JSON\n\
+     GET /<name>                        redirect to the canister\n\
+     GET /api/resolve/<name>            certified answer as JSON\n\
+     (a name is <handle>/<label>, or a flat name aliasing one)\n\
      GET /api/search?q=&tag=            directory search as JSON\n\
      GET /api/tags                      tags in use\n\n\
      Candid: resolve, get_record, list_names, register_handle, set_record.\n\
@@ -173,6 +174,19 @@ struct JsonRecord {
     created_ns: String,
     updated_ns: String,
     changed_hands_ns: String,
+    /// Flat names only; the four Harberger lines of the canonical form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flat: Option<JsonHarberger>,
+}
+
+/// Amounts and times as decimal strings, for the same reason as the
+/// timestamps above: cycles exceed 2^53.
+#[derive(Serialize)]
+struct JsonHarberger {
+    price: String,
+    balance: String,
+    settled_ns: String,
+    lapsed_ns: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -214,6 +228,12 @@ fn api_resolve(name: &str) -> HttpResponse {
                         created_ns: rec.created_ns.to_string(),
                         updated_ns: rec.updated_ns.to_string(),
                         changed_hands_ns: rec.changed_hands_ns.to_string(),
+                        flat: rec.flat.map(|h| JsonHarberger {
+                            price: h.price.to_string(),
+                            balance: h.balance.to_string(),
+                            settled_ns: h.settled_ns.to_string(),
+                            lapsed_ns: h.lapsed_ns.map(|t| t.to_string()),
+                        }),
                     })
                     .collect(),
                 certificate: r.certificate.map(|c| b64.encode(c)),

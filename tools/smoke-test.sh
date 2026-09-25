@@ -3,7 +3,10 @@
 # Deploys the names canister, registers a handle, sets an address and an
 # alias, resolves both, runs the independent verifier (tools/verify) on the
 # answer and on two forged answers, exercises announce through the deployer
-# allowlist, and hits the HTTP gateway through the local dfx gateway.
+# allowlist, hits the HTTP gateway through the local dfx gateway, and runs
+# a flat name through claim, buy, withdraw, lapse and release against the
+# local cycles ledger (dfx deps deploy installs it; the script funds the
+# test identities from their local wallets).
 #
 #   tools/smoke-test.sh
 #
@@ -20,7 +23,7 @@ fi
 export DFX_IDENTITY=$id
 me=$(dfx identity get-principal --identity "$id")
 echo "identity            : $id ($me)"
-dfx deploy --identity "$id" names >/dev/null 2>&1
+dfx deploy --yes --identity "$id" names >/dev/null 2>&1
 names=$(dfx canister id names)
 echo "names canister      : $names"
 
@@ -29,6 +32,7 @@ target=$names
 handle="smoke-$RANDOM"
 
 call() { dfx canister call --identity "$id" names "$@"; }
+treasury_field() { call treasury | grep -o "$1 = [0-9_]*" | tr -d '_' | awk '{print $3}'; }
 
 # An earlier aborted run may have left this identity listed as a deployer.
 call remove_deployer "(principal \"$me\")" >/dev/null 2>&1 || true
@@ -148,6 +152,105 @@ out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "
 echo "$out" | grep >/dev/null '^FAILED at E' || { echo "stale pin not caught:"; echo "$out"; exit 1; }
 call remove_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
 
+echo "--- flat names: local cycles ledger"
+ledger=um5iw-rqaaa-aaaaq-qaaba-cai
+if ! dfx canister id cycles_ledger >/dev/null 2>&1 || ! dfx canister call --identity "$id" $ledger icrc1_fee '()' >/dev/null 2>&1; then
+  dfx deps deploy --identity "$id" >/dev/null 2>&1
+fi
+fund() { # fund <identity> <cycles>: deposit from the identity's local wallet
+  local who=$1 amount=$2 p
+  p=$(dfx identity get-principal --identity "$who")
+  dfx canister call --identity "$who" --wallet "$(dfx identity get-wallet --identity "$who")" \
+    --with-cycles "$amount" $ledger deposit "(record { to = record { owner = principal \"$p\" } })" >/dev/null
+}
+approve() { # approve <identity>: let the names canister pull up to 10T
+  dfx canister call --identity "$1" $ledger icrc2_approve \
+    "(record { spender = record { owner = principal \"$names\" }; amount = 10_000_000_000_000 })" | grep >/dev/null 'Ok'
+}
+bal() { dfx canister call --identity "$id" $ledger icrc1_balance_of "(record { owner = principal \"$1\" })" | tr -d '_ ()nat:' ; }
+fund smoke-local 5000000000000
+fund smoke-other 5000000000000
+approve smoke-local
+approve smoke-other
+echo "--- fast tax for the test: 100 percent per year, 2 second grace"
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+flat="fl$RANDOM"
+echo "--- claim $flat -> $handle/app at 1T with a 100B deposit"
+call claim "(\"$flat\", \"nope\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'must alias a scoped name'
+call claim "(\"$flat\", \"$handle/app\", 1, 100_000_000_000)" | grep >/dev/null 'below the minimum'
+call claim "(\"$flat\", \"$handle/app\", 1_000_000_000_000, 1)" | grep >/dev/null 'one grace period'
+call claim "(\"$flat\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'Ok'
+call flat_status "(\"$flat\")" | grep >/dev/null 'status = variant { active }'
+echo "--- a held name cannot be claimed"
+dfx canister call --identity smoke-other names claim "(\"$flat\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'is owned by'
+echo "--- flat name resolves through its alias and verifies (chain of 2)"
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$flat" || true)
+echo "$out" | grep >/dev/null '^VERIFIED' || { echo "flat name did not verify:"; echo "$out"; exit 1; }
+echo "$out" | grep >/dev/null 'chain               : 2'
+echo "--- owner reassesses to 2T; a stranger cannot"
+dfx canister call --identity smoke-other names set_price "(\"$flat\", 2_000_000_000_000)" | grep >/dev/null 'does not own'
+call set_price "(\"$flat\", 2_000_000_000_000)" | grep >/dev/null 'Ok'
+echo "--- buyer takes it at 2T, assessing 3T; seller is credited price plus unspent balance"
+other=$(dfx identity get-principal --identity smoke-other)
+credit0=$(call credit "(principal \"$me\")" | tr -d '_ ()nat:')
+dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'Ok'
+call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$other\""
+credit=$(( $(call credit "(principal \"$me\")" | tr -d '_ ()nat:') - credit0 ))
+[ "$credit" -gt 2000000000000 ] && [ "$credit" -le 2100000000000 ] || { echo "seller credit delta wrong: $credit"; exit 1; }
+echo "--- seller withdraws 1T of credit to the ledger"
+before=$(bal "$me")
+call withdraw "(1_000_000_000_000)" | grep >/dev/null 'Ok'
+after=$(bal "$me")
+[ $((after - before)) -eq $((1000000000000 - 100000000)) ] || { echo "withdraw moved $((after - before)), expected 1T minus the fee"; exit 1; }
+echo "--- the fee comes from the ledger, and the ledger cannot change while funds are held"
+call harberger_config | grep >/dev/null 'fee = 100_000_000 : nat'
+call set_harberger_config "(record { ledger = principal \"$names\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'funds are held'
+echo "--- a rate change settles every flat name first (collected tax grows)"
+c0=$(treasury_field collected)
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 9000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+[ "$(treasury_field collected)" -gt "$c0" ] || { echo "rate change did not settle"; exit 1; }
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+
+echo "--- a name whose deposit runs out lapses, then frees, then can be claimed"
+# At the maximum price (10^18) a 200B deposit is spent in about six seconds,
+# and the whole of it is tax: enough for fund_self to pay the ledger fee.
+lapse="fl$RANDOM"
+call claim "(\"$lapse\", \"$handle/app\", 1_000_000_000_000_000_000, 200_000_000_000)" | grep >/dev/null 'Ok'
+sleep 10
+call flat_status "(\"$lapse\")" | grep >/dev/null 'status = variant { free }' || { echo "expected free after grace"; call flat_status "(\"$lapse\")"; exit 1; }
+call resolve "(\"$lapse\")" | grep >/dev/null 'has lapsed'
+call deposit "(\"$lapse\", 1_000_000)" | grep >/dev/null 'claim it instead'
+dfx canister call --identity smoke-other names claim "(\"$lapse\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'Ok'
+echo "--- tax was collected and the controller can fund the canister from it"
+collected=$(treasury_field collected)
+available=$((collected - $(treasury_field withdrawn)))
+[ "$available" -gt 100000000 ] || { echo "not enough tax to withdraw past the ledger fee (collected $collected)"; exit 1; }
+call fund_self "($((available + 1)))" | grep >/dev/null 'available to withdraw'
+call fund_self "(1)" | grep >/dev/null 'exceed the ledger fee'
+call fund_self "($available)" | grep >/dev/null 'Ok'
+[ "$(treasury_field withdrawn)" = "$collected" ] || { echo "withdrawn != collected after fund_self"; call treasury; exit 1; }
+echo "--- top up keeps a name active; release refunds the balance as credit"
+dfx canister call --identity smoke-other names deposit "(\"$lapse\", 1_000_000_000)" | grep >/dev/null 'Ok'
+echo "--- a top-up must leave one grace period of tax: dust on an empty name is refused"
+# At the maximum price and 100 percent a year the tax is about 3.2e10 per
+# second. With an 8 second grace, a 12 second deposit lapses at 12 s and is
+# free at 20 s, so a check at about 14 s lands inside grace with room for
+# call latency on either side.
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 8_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+dust="fl$RANDOM"
+call claim "(\"$dust\", \"$handle/app\", 1_000_000_000_000_000_000, 380_000_000_000)" | grep >/dev/null 'Ok'
+sleep 13
+call flat_status "(\"$dust\")" | grep >/dev/null 'grace = record' || { echo "expected grace"; call flat_status "(\"$dust\")"; exit 1; }
+call deposit "(\"$dust\", 1_000)" | grep >/dev/null 'one grace period of tax'
+call deposit "(\"$dust\", 400_000_000_000)" | grep >/dev/null 'Ok'
+call flat_status "(\"$dust\")" | grep >/dev/null 'status = variant { active }'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+ocredit=$(call credit "(principal \"$other\")" | tr -d '_ ()nat:')
+dfx canister call --identity smoke-other names delete_record "(\"$lapse\")" | grep >/dev/null 'Ok'
+ocredit2=$(call credit "(principal \"$other\")" | tr -d '_ ()nat:')
+[ "$ocredit2" -gt "$ocredit" ] || { echo "release did not credit the balance"; exit 1; }
+call flat_status "(\"$lapse\")" | grep >/dev/null '(null)'
+
 echo "--- http gateway through the local dfx gateway"
 gw() { curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943$1"; }
 got=$(gw "/$handle/app")
@@ -163,14 +266,14 @@ echo "$json" | grep >/dev/null '"certificate":"' || { echo "api json lacks certi
 echo "$json" | grep >/dev/null '"witness":"' || { echo "api json lacks witness"; exit 1; }
 echo "$json" | grep >/dev/null '"created_ns":"[0-9]*"' || { echo "api json timestamps must be decimal strings"; echo "$json"; exit 1; }
 echo "--- /api/search and /api/tags JSON (raw query)"
-json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/search?q=smoke+test&tag=deploy&limit=5")
+json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/search?q=$handle&tag=deploy&limit=5")
 echo "$json" | grep >/dev/null "\"name\":\"$handle/app\"" || { echo "api search wrong:"; echo "$json"; exit 1; }
 echo "$json" | grep >/dev/null '"updated_ns":"[0-9]*"' || { echo "api search timestamps must be strings"; echo "$json"; exit 1; }
 json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/tags")
 echo "$json" | grep >/dev/null '"tag":"deploy"' || { echo "api tags wrong:"; echo "$json"; exit 1; }
 
 echo "--- upgrade keeps records, re-certifies, and lands on the current schema"
-dfx deploy --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
+dfx deploy --yes --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
 out=$(call resolve "(\"$handle/app\")")
 echo "$out" | grep >/dev/null "canister = principal \"$target\"" || { echo "record lost across upgrade"; exit 1; }
 echo "$out" | grep >/dev/null 'certificate = opt blob' || { echo "no certificate after upgrade"; exit 1; }

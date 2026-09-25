@@ -1,0 +1,8 @@
+{
+  "canisters": {
+    "um5iw-rqaaa-aaaaq-qaaba-cai": {
+      "arg_str": "(variant { Init = record { max_blocks_per_request = 1000 } })",
+      "arg_raw": "4449444c0e6b02fcb88b840301b0ced18403066e026c02978ca9b80203afe0ff870d056e046b029d83f46a68c9c5f1d0037f6e786c03b2a4dab20507a89cb2b50c0dafe0ff870d786e086d096c02000a017d6c02b3b0dac30368ad86ca83050b6e0c6d7b6e680100010000e803000000000000"
+    }
+  }
+}

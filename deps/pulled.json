@@ -1,0 +1,13 @@
+{
+  "canisters": {
+    "um5iw-rqaaa-aaaaq-qaaba-cai": {
+      "name": "cycles_ledger",
+      "wasm_hash": "ed99402535bb4f58e4ab469acc40c903f2fdeea409be16623d5c6a9131cbf120",
+      "wasm_hash_download": "ed99402535bb4f58e4ab469acc40c903f2fdeea409be16623d5c6a9131cbf120",
+      "init_guide": "Set max_blocks_per_request in Init record",
+      "init_arg": "(variant{Init=record{max_blocks_per_request=1000}})",
+      "candid_args": "(LedgerArgs)",
+      "gzip": true
+    }
+  }
+}
