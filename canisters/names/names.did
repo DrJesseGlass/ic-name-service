@@ -203,6 +203,10 @@ service : {
   // stable memory layout version (store.rs SCHEMA); migrations key on it
   schema_version : () -> (nat32) query;
 
+  // custom domains served at /.well-known/ic-domains (controllers)
+  set_domains : (vec text) -> (Result);
+  domains : () -> (vec text) query;
+
   // deployers: controllers list them; a listed deployer may announce
   add_deployer : (principal) -> (Result);
   remove_deployer : (principal) -> (Result);
@@ -211,6 +215,7 @@ service : {
 
   // stage 1 gateway, every response certified with a skip-certification
   // expression: /<name> -> 302 (or a warning page after a sale);
-  // /api/resolve/<name>, /api/search, /api/tags, /api/expiring -> JSON
+  // /api/resolve/<name>, /api/search, /api/tags, /api/expiring -> JSON;
+  // /.well-known/ic-domains -> text
   http_request : (HttpRequest) -> (HttpResponse) query;
 }

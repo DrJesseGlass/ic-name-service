@@ -108,6 +108,25 @@ pub fn check_tags(value: &str) -> Result<Vec<String>, String> {
     Ok(tags)
 }
 
+/// A hostname for a custom domain: at least two dot-separated labels,
+/// each in the segment grammar (lowercase letters, digits, inner
+/// hyphens, at most 63 bytes), at most 253 bytes in all. Case-folded
+/// input is refused rather than folded, so what is stored is what was
+/// checked.
+pub fn check_hostname(host: &str) -> Result<(), String> {
+    if host.len() > 253 {
+        return Err(format!("'{host}' is longer than 253 bytes"));
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return Err(format!("'{host}' needs at least two labels"));
+    }
+    for label in labels {
+        check_segment("hostname label", label).map_err(|e| format!("'{host}': {e}"))?;
+    }
+    Ok(())
+}
+
 /// Lowercase hex of exactly one of the given byte lengths (a git commit is
 /// 20 bytes, a module hash 32).
 pub fn check_hex(what: &str, s: &str, byte_lens: &[usize]) -> Result<(), String> {
@@ -162,6 +181,30 @@ mod tests {
                 .join(",")
         )
         .is_err());
+    }
+
+    #[test]
+    fn hostnames() {
+        assert!(check_hostname("names.example").is_ok());
+        assert!(check_hostname("a.b.c.example").is_ok());
+        assert!(check_hostname("example").is_err());
+        assert!(check_hostname("foo..example").is_err());
+        assert!(check_hostname("-foo.example").is_err());
+        assert!(check_hostname("foo-.example").is_err());
+        assert!(check_hostname(".example.com").is_err());
+        assert!(check_hostname("example.com.").is_err());
+        assert!(check_hostname("Foo.example").is_err());
+        assert!(check_hostname("bad host").is_err());
+        assert!(check_hostname(&format!("{}.example", "a".repeat(64))).is_err());
+        assert!(check_hostname(&format!("{}.example", "a".repeat(63))).is_ok());
+        let long = format!(
+            "{}.{}.{}.{}.com",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(60)
+        );
+        assert!(check_hostname(&long).is_err());
     }
 
     #[test]

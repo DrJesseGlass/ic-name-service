@@ -106,13 +106,51 @@ fn check_flat_target(target: &Target) -> Result<(), String> {
     }
 }
 
-/// Controllers administer the deployer list.
+/// Controllers administer the canister: the deployer list, the tax
+/// config, the treasury, the gateway domains. ic-git creates an app
+/// canister with the repo owner and itself as controllers, so the people
+/// who push the code are controllers of what it installs.
 fn admin() -> Result<Principal, String> {
     let c = caller()?;
     if !ic_cdk::api::is_controller(&c) {
         return Err("caller is not a controller".to_string());
     }
     Ok(c)
+}
+
+// --- gateway domains (DESIGN.md section 6, stage 1) --------------------------
+//
+// The boundary nodes register a custom domain for a canister only if the
+// canister lists it at /.well-known/ic-domains. The list lives in META.
+
+const DOMAINS_KEY: &str = "domains";
+
+fn domains_inner() -> Vec<String> {
+    store::meta_get(DOMAINS_KEY)
+        .map(|b| {
+            String::from_utf8_lossy(&b)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Set the custom domains this canister claims. Each is a hostname
+/// (names::check_hostname), no scheme or path. Controllers only.
+#[ic_cdk::update]
+fn set_domains(domains: Vec<String>) -> Result<(), String> {
+    admin()?;
+    for d in &domains {
+        names::check_hostname(d)?;
+    }
+    store::meta_set(DOMAINS_KEY, domains.join("\n").into_bytes());
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn domains() -> Vec<String> {
+    domains_inner()
 }
 
 /// Write a record everywhere it lives: the tag index, the certified tree

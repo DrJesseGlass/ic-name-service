@@ -1,5 +1,5 @@
 {
   "canister": "",
-  "note": "Machine-readable record of reproduced module hashes, same shape as ic-git's verified.json. Newest entry last. Empty until the first mainnet deploy; tools/reproducible-build.sh --docker --check fills the first entry.",
+  "note": "Machine-readable record of reproduced module hashes, same shape as ic-git's verified.json. Newest entry last; tools/check-module-hash.sh compares the live canister against the last entry. Empty until the first deploy. The hash is of the RAW wasm (deploy/name_canister.wasm), which is what an ic-git install puts on chain.",
   "verified": []
 }

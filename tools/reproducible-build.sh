@@ -51,7 +51,9 @@ done
 commit=unknown
 if git rev-parse --git-dir >/dev/null 2>&1; then
   commit=$(git rev-parse HEAD)
-  if [ -n "$(git status --porcelain)" ]; then
+  # deploy/ holds this build's own output (tools/stage-artifact.sh) and is
+  # not in the build context, so its state does not make the tree dirty.
+  if [ -n "$(git status --porcelain -- . ':!deploy')" ]; then
     if [ "$allow_dirty" = 1 ]; then
       commit="$commit-dirty"
       echo "WARNING: building a dirty tree; the resulting hash belongs to no commit." >&2

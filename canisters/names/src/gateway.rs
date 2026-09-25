@@ -8,6 +8,7 @@
 //!   GET /api/search?q=&tag=&offset=&limit=   directory search as JSON
 //!   GET /api/tags                      tags in use with counts
 //!   GET /api/expiring?days=N           flat names running out within N days
+//!   GET /.well-known/ic-domains        custom domains, for the boundary nodes
 //!   GET /                              a short usage page
 //!
 //! Every response is a query response carrying the IC-Certificate and
@@ -143,6 +144,15 @@ pub fn handle(req: &HttpRequest) -> HttpResponse {
     }
     if path == "/api/expiring" || path == "/api/expiring/" {
         return api_expiring(&query_of(&req.url));
+    }
+    if path == "/.well-known/ic-domains" {
+        // What the boundary nodes read before registering a custom domain
+        // for this canister: one hostname per line.
+        let mut body = crate::domains_inner().join("\n");
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        return response(200, "text/plain", body.into_bytes());
     }
     let name = path.trim_start_matches('/').trim_end_matches('/');
     match crate::follow(name) {

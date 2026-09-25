@@ -21,3 +21,6 @@ tools/verify
 
 # Pulled dependency metadata (the local cycles ledger for tests); not built in.
 deps
+
+# The staged artifact is an output, never an input.
+deploy

@@ -25,6 +25,9 @@ deployed; deployment will go through ic-git.
       src/gateway.rs         HTTP: /<name> -> 302, /api/* -> JSON
     tools/verify/            independent verifier of a resolve answer (own
                              cargo workspace; uses ic-agent)
+    tools/stage-artifact.sh  Docker build, then copy the raw wasm to deploy/
+    tools/check-module-hash.sh
+                             live module hash vs the last verified.json entry
     tools/smoke-test.sh      end-to-end run against a local replica
     tools/reproducible-build.sh, Dockerfile.build, tools/build-env.sh
                              the ic-git build recipe, unchanged in substance
@@ -148,6 +151,7 @@ the announced code fails verification instead of silently routing.
     GET /api/search?q=&tag=&offset=&limit=   directory search as JSON
     GET /api/tags                      tags in use with counts
     GET /api/expiring?days=N           flat names running out within N days
+    GET /.well-known/ic-domains        custom domains claimed, one per line
     GET /                              usage
 
 Every response is a query response with the IC-Certificate and
@@ -168,6 +172,24 @@ changed, and within the window; its `--handover-warn-days` defaults to
 the canister's 30). `/api/expiring?days=N` lists flat names whose
 balance runs out, or whose grace period ends, within N days, for holders
 and their tooling to poll.
+
+## Deployment through ic-git
+
+Admin methods (deployer list, tax config, treasury, gateway domains) are
+open to the canister's controllers. ic-git creates an app canister with
+the repo owner and itself as controllers, so whoever owns the repo on
+ic-git administers the name service it installs; nothing else needs to
+be configured for that.
+
+ic-git installs a committed raw wasm. `tools/stage-artifact.sh` builds
+in the pinned container and copies it to deploy/name_canister.wasm; commit
+that file on each release and point the ic-git deploy config at that
+path. Its sha256 is the module hash the chain reports, recorded in
+verified.json and checked by `tools/check-module-hash.sh`.
+
+The stage 1 gateway needs one custom domain. `set_domains` stores the
+hostnames the canister claims and `/.well-known/ic-domains` serves them,
+which is what the boundary nodes read before registering a domain.
 
 ## Certified resolution
 
