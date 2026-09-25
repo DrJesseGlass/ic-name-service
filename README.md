@@ -55,7 +55,6 @@ deployed; deployment will go through ic-git.
     search          : (SearchQuery) -> (SearchResult) query  substring and tag, paged
     tags            : () -> (vec TagCount) query
     http_request    : (HttpRequest) -> (HttpResponse) query
-    http_request_update : (HttpRequest) -> (HttpResponse)
 
 Writes require the caller to own the handle. Resolution visits at most 8
 records (the name plus 7 alias hops) and refuses loops.
@@ -90,10 +89,12 @@ ledger when they like. When the balance runs out the name enters a grace
 period (30 days by default), after which it is free to claim.
 
 The market is closed by default: `flat_names_open` in the config gates
-claim and buy, so a release can ship scoped names alone and open flat
-names later. Holders can always top up, reassess, withdraw and release. A
-buy carries a `max_price`, the price the buyer saw, and is refused if the
-seller has since moved above it.
+new claims, so a release can ship scoped names alone and open flat names
+later. Buying a held name is never gated, because the forced sale is what
+keeps a holder's price honest; closing the market stops new names, not
+the pressure on existing ones. Holders can always top up, reassess,
+withdraw and release. A buy carries a `max_price`, the price the buyer
+saw, and is refused if the seller has since moved above it.
 
 Payments are ICRC-2 pulls from the caller's cycles ledger account, so a
 caller first approves this canister as a spender for the amount plus the

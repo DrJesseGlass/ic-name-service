@@ -164,13 +164,16 @@ pub fn handle(req: &HttpRequest) -> HttpResponse {
 }
 
 /// If any record in the chain changed hands within the configured warning
-/// window, a page saying so instead of a silent redirect (DESIGN.md
-/// section 5: the forced sale must be visible). Plain HTML, no scripts.
+/// window and points somewhere new, a page saying so instead of a silent
+/// redirect (DESIGN.md section 5: the forced sale must be visible). A new
+/// holder who kept the old target changed nothing a visitor can see, so
+/// that case redirects. Plain HTML, no scripts.
 fn handover_page(chain: &[crate::store::Record], location: &str) -> Option<String> {
     let now = ic_cdk::api::time();
     let warn_ns = crate::harberger::config().handover_warn_ns;
     let r = chain.iter().find(|r| {
-        r.previous_target.is_some() && now.saturating_sub(r.changed_hands_ns) < warn_ns
+        r.previous_target.as_ref().is_some_and(|p| *p != r.target)
+            && now.saturating_sub(r.changed_hands_ns) < warn_ns
     })?;
     let show = |t: &crate::store::Target| match t {
         crate::store::Target::Alias(n) => n.clone(),
@@ -186,7 +189,7 @@ fn handover_page(chain: &[crate::store::Record], location: &str) -> Option<Strin
          <style>body{{font-family:sans-serif;max-width:40em;margin:3em auto;padding:0 1em;line-height:1.5}}\
          code{{background:#eee;padding:0 .3em}}</style></head><body>\n\
          <h1>{name} changed hands</h1>\n\
-         <p>The name <code>{name}</code> was bought {days_ago} day(s) ago. Until then it pointed at\n\
+         <p>The name <code>{name}</code> changed hands {days_ago} day(s) ago. Until then it pointed at\n\
          <code>{prev}</code>. It now points at <code>{now_target}</code>.</p>\n\
          <p>A flat name is a vanity handle that anyone may buy at its listed price. The scoped name\n\
          under it is the identity that does not change hands. If you meant the site you visited\n\

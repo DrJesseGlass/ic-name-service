@@ -179,7 +179,9 @@ const MEM_CREDITS: MemoryId = MemoryId::new(5);
 /// Layout version of stable memory. Bump it when an upgrade must run a
 /// migration in post_upgrade. 1: M0 (handles, records, deployers).
 /// 2: M1 adds the tag index, filled from existing records on first upgrade.
-pub const SCHEMA: u32 = 2;
+/// 3: the Harberger config gains flat_names_open and handover_warn_ns;
+/// a stored schema 2 config is rewritten in the new shape.
+pub const SCHEMA: u32 = 3;
 const SCHEMA_KEY: &str = "schema";
 
 /// A virtual memory for a map that lives in another module.

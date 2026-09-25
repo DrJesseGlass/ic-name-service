@@ -138,7 +138,7 @@ type HarbergerConfig = record {
   min_price : nat;       // cycles
   grace_ns : nat64;
   fee : nat;             // the ledger's transfer fee as it answered when set; pinned on transfers
-  flat_names_open : bool;    // claim and buy allowed; false by default
+  flat_names_open : bool;    // new claims allowed; false by default; buy is never gated
   handover_warn_ns : nat64;  // gateway shows a warning page this long after a sale
 };
 

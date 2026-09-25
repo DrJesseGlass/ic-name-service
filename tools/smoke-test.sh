@@ -200,11 +200,18 @@ echo "--- a buy capped below the current price is refused"
 dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000, 1_000_000_000_000)" | grep >/dev/null 'above your limit'
 dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000, 2_000_000_000_000)" | grep >/dev/null 'Ok'
 call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$other\""
+echo "--- closing the market does not stop a buy of a held name"
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+call claim "(\"closed$RANDOM\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'not open'
+call buy "(\"$flat\", \"$handle/pushed\", 3_000_000_000_000, 100_000_000_000, 3_000_000_000_000)" | grep >/dev/null 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$me\""
 echo "--- the sold name remembers where it pointed, and the gateway warns instead of redirecting"
 call get_record "(\"$flat\")" | grep >/dev/null "previous_target = opt variant { alias = \"$handle/app\" }"
 page=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
 echo "$page" | grep >/dev/null "<h1>$flat changed hands</h1>" || { echo "no handover page:"; echo "$page" | head -5; exit 1; }
-echo "$page" | grep >/dev/null "Continue to $handle/app"
+echo "$page" | grep >/dev/null "Continue to $handle/pushed"
+echo "$page" | grep >/dev/null "Go to $handle/app instead"
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
 [ "$code" = 200 ] || { echo "handover page status $code"; exit 1; }
 echo "--- expiring lists the name with a deadline; a short window does not"
@@ -296,7 +303,7 @@ dfx deploy --yes --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
 out=$(call resolve "(\"$handle/app\")")
 echo "$out" | grep >/dev/null "canister = principal \"$target\"" || { echo "record lost across upgrade"; exit 1; }
 echo "$out" | grep >/dev/null 'certificate = opt blob' || { echo "no certificate after upgrade"; exit 1; }
-call schema_version | grep >/dev/null '(2 : nat32)' || { echo "schema not at 2 after upgrade"; exit 1; }
+call schema_version | grep >/dev/null '(3 : nat32)' || { echo "schema not at 3 after upgrade"; exit 1; }
 call search "(record { tag = opt \"deploy\" })" | grep >/dev/null "$handle/app" || { echo "tag index lost across upgrade"; exit 1; }
 
 echo "SMOKE OK"

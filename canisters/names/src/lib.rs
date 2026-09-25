@@ -45,6 +45,9 @@ fn post_upgrade() {
     if from < 2 {
         directory::rebuild();
     }
+    if from < 3 {
+        harberger::migrate_config_from_v2();
+    }
     store::set_schema_version(store::SCHEMA);
 }
 
@@ -526,13 +529,16 @@ fn snapshot(cfg: &HarbergerConfig, name: &str, now: u64) -> Option<(Record, u128
     Some((r, taken, snap))
 }
 
-/// Claim and buy are refused while the market is closed. Everything a
-/// holder needs to keep or leave a name stays open.
+/// Claiming is refused while the market is closed. Buying a held name is
+/// never gated: the forced sale is what keeps a holder's price honest
+/// (DESIGN.md section 5), so closing the market stops new names, not the
+/// pressure on existing ones. Everything a holder needs to keep or leave
+/// a name stays open too.
 fn market_open(cfg: &HarbergerConfig) -> Result<(), String> {
     if cfg.flat_names_open {
         Ok(())
     } else {
-        Err("flat names are not open for claim or purchase yet".to_string())
+        Err("flat names are not open for claiming yet".to_string())
     }
 }
 
@@ -720,7 +726,6 @@ async fn buy(
     max_price: u128,
 ) -> Result<(), String> {
     let cfg = harberger::config();
-    market_open(&cfg)?;
     let caller = caller()?;
     names::check_flat(&name)?;
     let target = Target::Alias(alias_to);

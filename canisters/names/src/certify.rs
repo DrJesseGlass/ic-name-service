@@ -46,8 +46,13 @@ fn skip_tree() -> HashTree {
     )
 }
 
+thread_local! {
+    /// The skip subtree never changes, so its digest is computed once.
+    static SKIP_DIGEST: Hash = skip_tree().digest();
+}
+
 fn skip_digest() -> Hash {
-    skip_tree().digest()
+    SKIP_DIGEST.with(|d| *d)
 }
 
 /// Alias chains longer than this fail to resolve. Answers the open question
