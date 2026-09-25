@@ -495,7 +495,8 @@ struct Snapshot {
 /// fails without changing the record: the payer's cycles, if taken, sit
 /// in this canister's ledger account until the operator reconciles.
 async fn pull(cfg: &HarbergerConfig, payer: Principal, amount: u128) -> Result<(), String> {
-    match ledger::pull(cfg.ledger, payer, amount).await {
+    let _guard = InFlight::start();
+    match ledger::pull(cfg.ledger, payer, amount, cfg.fee).await {
         Ok(_) => Ok(()),
         Err(f) => {
             if !f.nothing_moved() {
@@ -769,11 +770,35 @@ fn credit(p: Principal) -> u128 {
     store::credit_of(&p)
 }
 
-/// The cycles ledger's transfer fee. The ledger charges it on top of the
-/// amount on every transfer or withdraw out of this canister's account,
-/// so every payout sends amount minus the fee and the account is debited
-/// exactly amount.
-const LEDGER_FEE: u128 = 100_000_000;
+// The ledger's transfer fee is charged on top of the amount on every
+// transfer or withdraw out of this canister's account, so every payout
+// sends amount minus cfg.fee and the account is debited exactly amount.
+// cfg.fee is what the ledger answered when the config was set, and it is
+// pinned on transfers so a change fails the transfer instead.
+
+thread_local! {
+    /// Ledger calls awaiting a reply. A ledger change is refused while
+    /// any are outstanding, since their cycles land at the old ledger.
+    static IN_FLIGHT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct InFlight;
+
+impl InFlight {
+    fn start() -> Self {
+        IN_FLIGHT.with(|c| c.set(c.get() + 1));
+        InFlight
+    }
+    fn count() -> u32 {
+        IN_FLIGHT.with(|c| c.get())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
 
 /// Move `amount` of the caller's credit (sale proceeds, refunds) to the
 /// caller's cycles ledger account. The ledger fee comes out of it.
@@ -781,13 +806,15 @@ const LEDGER_FEE: u128 = 100_000_000;
 async fn withdraw(amount: u128) -> Result<u128, String> {
     let cfg = harberger::config();
     let caller = caller()?;
-    if amount <= LEDGER_FEE {
+    if amount <= cfg.fee {
         return Err(format!(
-            "amount must exceed the ledger fee of {LEDGER_FEE} cycles"
+            "amount must exceed the ledger fee of {} cycles",
+            cfg.fee
         ));
     }
     store::take_credit(&caller, amount)?;
-    match ledger::pay(cfg.ledger, caller, amount - LEDGER_FEE).await {
+    let _guard = InFlight::start();
+    match ledger::pay(cfg.ledger, caller, amount - cfg.fee, cfg.fee).await {
         Ok(block) => Ok(block),
         Err(f) => {
             // Only give the credit back when the ledger certainly paid
@@ -837,13 +864,24 @@ async fn fund_self(amount: u128) -> Result<u128, String> {
     admin()?;
     let cfg = harberger::config();
     let available = harberger::tax_collected().saturating_sub(harberger::tax_withdrawn());
-    if amount <= LEDGER_FEE || amount > available {
+    if amount <= cfg.fee || amount > available {
         return Err(format!(
-            "{available} cycles of tax available to withdraw; amount must exceed the ledger fee of {LEDGER_FEE}"
+            "{available} cycles of tax available to withdraw; amount must exceed the ledger fee of {}",
+            cfg.fee
+        ));
+    }
+    // withdraw cannot pin a fee, so check the live one against the pinned
+    // one first: a changed fee would come out of prepaid balances.
+    let _guard = InFlight::start();
+    let live = ledger::fee(cfg.ledger).await.map_err(|f| f.message())?;
+    if live != cfg.fee {
+        return Err(format!(
+            "ledger fee is now {live}, config has {}; run set_harberger_config to refresh it",
+            cfg.fee
         ));
     }
     harberger::note_tax_withdrawn(amount);
-    match ledger::fund_self(cfg.ledger, amount - LEDGER_FEE).await {
+    match ledger::fund_self(cfg.ledger, amount - cfg.fee).await {
         Ok(block) => Ok(block),
         Err(f) => {
             if f.nothing_moved() {
@@ -859,9 +897,70 @@ async fn fund_self(amount: u128) -> Result<u128, String> {
     }
 }
 
+/// Is any value held that a ledger change would strand? Describes it.
+fn funds_held() -> Result<(), String> {
+    let mut flat = 0u32;
+    store::for_each_record(|r| {
+        if r.flat.is_some() {
+            flat += 1;
+        }
+    });
+    let credits = store::credits_outstanding();
+    let tax = harberger::tax_collected().saturating_sub(harberger::tax_withdrawn());
+    let (unreconciled, _) = harberger::unreconciled();
+    let in_flight = InFlight::count();
+    if flat == 0 && credits == 0 && tax == 0 && unreconciled == 0 && in_flight == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "funds are held at the current ledger: {flat} flat name(s), {credits} cycles of credit, {tax} of tax, {unreconciled} unreconciled, {in_flight} call(s) in flight"
+    ))
+}
+
+/// Settle every flat name to `now` under `cfg` and store the result, so
+/// a rate change from here on applies only to time after it.
+fn settle_all(cfg: &HarbergerConfig, now: u64) -> (u32, u128) {
+    let mut names = Vec::new();
+    store::for_each_record(|r| {
+        if r.flat.is_some() {
+            names.push(r.name.clone());
+        }
+    });
+    let mut settled = 0u32;
+    let mut tax_total = 0u128;
+    for name in names {
+        if let Some(mut r) = store::get_record(&name) {
+            let (_, tax) = harberger::settle_record(cfg, &mut r, now);
+            tax_total = tax_total.saturating_add(tax);
+            settled += 1;
+            commit_flat(r, tax);
+        }
+    }
+    (settled, tax_total)
+}
+
+/// Change the tax settings. Controllers only. The ledger may only change
+/// while nothing is held or in flight at the current one. The fee is
+/// what the ledger answers, not what the caller passes. Existing names
+/// are settled under the old rate first, so the new rate never reaches
+/// back in time.
 #[ic_cdk::update]
-fn set_harberger_config(c: HarbergerConfig) -> Result<(), String> {
+async fn set_harberger_config(c: HarbergerConfig) -> Result<(), String> {
     admin()?;
+    let mut c = c;
+    let current = harberger::config();
+    if c.ledger != current.ledger {
+        funds_held()?;
+    }
+    c.fee = ledger::fee(c.ledger).await.map_err(|f| f.message())?;
+    // Re-read after the await; another controller may have moved first.
+    let current = harberger::config();
+    if c.ledger != current.ledger {
+        funds_held()?;
+    }
+    if c.rate_bps != current.rate_bps {
+        settle_all(&current, ic_cdk::api::time());
+    }
     harberger::set_config(c)
 }
 

@@ -239,6 +239,15 @@ pub fn add_credit(p: &Principal, amount: u128) {
     });
 }
 
+/// Every credit owed, summed.
+pub fn credits_outstanding() -> u128 {
+    CREDITS.with(|c| {
+        c.borrow()
+            .iter()
+            .fold(0u128, |acc, e| acc.saturating_add(e.value()))
+    })
+}
+
 /// Take `amount` from a credit. Err if it is not there.
 pub fn take_credit(p: &Principal, amount: u128) -> Result<(), String> {
     CREDITS.with(|c| {
@@ -459,8 +468,10 @@ mod tests {
         add_credit(&p, 5);
         assert_eq!(credit_of(&p), 15);
         assert!(take_credit(&p, 20).is_err());
+        assert_eq!(credits_outstanding(), 15);
         assert!(take_credit(&p, 15).is_ok());
         assert_eq!(credit_of(&p), 0);
+        assert_eq!(credits_outstanding(), 0);
         assert_eq!(meta_get_u128("tax"), 0);
         meta_set_u128("tax", 7);
         assert_eq!(meta_get_u128("tax"), 7);

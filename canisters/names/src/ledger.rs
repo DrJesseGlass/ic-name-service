@@ -163,15 +163,32 @@ fn nat_to_u128(n: Nat) -> u128 {
     u128::from_le_bytes(buf)
 }
 
+/// The ledger's current transfer fee.
+pub async fn fee(ledger: Principal) -> Result<u128, Failure> {
+    let res = Call::unbounded_wait(ledger, "icrc1_fee")
+        .await
+        .map_err(|e| Failure::Rejected(format!("icrc1_fee: {e:?}")))?;
+    res.candid::<Nat>()
+        .map(nat_to_u128)
+        .map_err(|e| Failure::Undecodable(format!("icrc1_fee: undecodable reply: {e}")))
+}
+
 /// Pull `amount` cycles from `payer` into this canister's ledger account.
-/// The payer must have approved at least amount plus the fee.
-pub async fn pull(ledger: Principal, payer: Principal, amount: u128) -> Result<u128, Failure> {
+/// The payer must have approved at least amount plus the fee. The fee is
+/// pinned: if the ledger's fee is no longer `fee` it refuses (BadFee)
+/// rather than charging the payer something else.
+pub async fn pull(
+    ledger: Principal,
+    payer: Principal,
+    amount: u128,
+    fee: u128,
+) -> Result<u128, Failure> {
     call(
         ledger,
         "icrc2_transfer_from",
         TransferFromArgs {
             to: account(ic_cdk::api::canister_self()),
-            fee: None,
+            fee: Some(Nat::from(fee)),
             spender_subaccount: None,
             from: account(payer),
             memo: None,
@@ -183,14 +200,20 @@ pub async fn pull(ledger: Principal, payer: Principal, amount: u128) -> Result<u
 }
 
 /// Pay `amount` cycles from this canister's ledger account to `to`. The
-/// fee comes out of this canister's account on top.
-pub async fn pay(ledger: Principal, to: Principal, amount: u128) -> Result<u128, Failure> {
+/// pinned `fee` comes out of this canister's account on top; a changed
+/// fee makes the ledger refuse rather than debit more than was budgeted.
+pub async fn pay(
+    ledger: Principal,
+    to: Principal,
+    amount: u128,
+    fee: u128,
+) -> Result<u128, Failure> {
     call(
         ledger,
         "icrc1_transfer",
         TransferArgs {
             to: account(to),
-            fee: None,
+            fee: Some(Nat::from(fee)),
             memo: None,
             from_subaccount: None,
             created_at_time: None,
@@ -201,7 +224,8 @@ pub async fn pay(ledger: Principal, to: Principal, amount: u128) -> Result<u128,
 }
 
 /// Move `amount` cycles from this canister's ledger account into its own
-/// cycles balance.
+/// cycles balance. `withdraw` has no fee field to pin, so the caller
+/// checks the live fee against the pinned one first.
 pub async fn fund_self(ledger: Principal, amount: u128) -> Result<u128, Failure> {
     call(
         ledger,

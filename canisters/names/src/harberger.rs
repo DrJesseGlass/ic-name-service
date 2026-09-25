@@ -33,6 +33,10 @@ pub struct Config {
     pub min_price: u128,
     /// How long a name with no balance stays with its owner.
     pub grace_ns: u64,
+    /// The ledger's transfer fee, cycles, as it answered icrc1_fee when the
+    /// config was set. Pinned on every transfer so a changed fee fails the
+    /// transfer instead of quietly over-debiting this canister's account.
+    pub fee: u128,
 }
 
 impl Default for Config {
@@ -42,6 +46,7 @@ impl Default for Config {
             rate_bps: 700,
             min_price: 100_000_000_000,
             grace_ns: 30 * 24 * 60 * 60 * 1_000_000_000,
+            fee: 100_000_000,
         }
     }
 }

@@ -130,10 +130,11 @@ type FlatStatus = record {
 };
 
 type HarbergerConfig = record {
-  ledger : principal;    // the cycles ledger (ICRC-2)
+  ledger : principal;    // the cycles ledger (ICRC-2); changeable only while nothing is held
   rate_bps : nat32;      // tax per year on the price, basis points
   min_price : nat;       // cycles
   grace_ns : nat64;
+  fee : nat;             // the ledger's transfer fee as it answered when set; pinned on transfers
 };
 
 type Treasury = record {
@@ -176,6 +177,8 @@ service : {
   withdraw : (nat) -> (NatResult);                 // credit -> caller's ledger account
   treasury : () -> (Treasury) query;
   fund_self : (nat) -> (NatResult);                // controllers: tax -> own cycles
+  // controllers; reads the fee from the ledger, settles all names before a
+  // rate change, refuses a ledger change while funds are held
   set_harberger_config : (HarbergerConfig) -> (Result);
   harberger_config : () -> (HarbergerConfig) query;
 

@@ -107,6 +107,14 @@ Every payment method validates, pulls, then re-reads the record, and if
 the name changed hands during the pull it credits the payer back and
 fails, so two buyers racing for one name cannot both pay.
 
+Config changes are guarded. The ledger's transfer fee is read from the
+ledger when the config is set and pinned on every transfer, so a fee
+change makes a transfer fail instead of quietly debiting more than the
+books record. A rate change settles every flat name under the old rate
+first, so the new rate never reaches back in time. The ledger itself can
+only change while nothing is held there: no flat names, credits,
+unwithdrawn tax, unreconciled amounts, or calls in flight.
+
 ## Directory
 
 A registry answers "where is X"; the directory answers "what exists".
