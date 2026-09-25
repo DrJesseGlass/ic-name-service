@@ -212,6 +212,13 @@ page=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
 echo "$page" | grep >/dev/null "<h1>$flat changed hands</h1>" || { echo "no handover page:"; echo "$page" | head -5; exit 1; }
 echo "$page" | grep >/dev/null "Continue to $handle/pushed"
 echo "$page" | grep >/dev/null "Go to $handle/app instead"
+echo "--- the verifier warns about the recent change of target, and not outside its window"
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$flat" || true)
+echo "$out" | grep >/dev/null "^WARNING             : $flat changed hands" || { echo "verifier did not warn:"; echo "$out"; exit 1; }
+echo "$out" | grep >/dev/null '^VERIFIED'
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" --handover-warn-days 0 "$flat" || true)
+echo "$out" | grep >/dev/null '^WARNING' && { echo "verifier warned outside its window"; exit 1; }
+echo "$out" | grep >/dev/null '^VERIFIED'
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
 [ "$code" = 200 ] || { echo "handover page status $code"; exit 1; }
 echo "--- expiring lists the name with a deadline; a short window does not"

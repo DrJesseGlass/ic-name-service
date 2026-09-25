@@ -163,7 +163,9 @@ After a flat name changes hands, `/<flat>` serves a plain HTML page for
 the configured window (30 days by default) instead of redirecting: it
 names the date, the old target and the new one, and links to both. The
 record keeps `previous_target`, which is certified, and the verifier
-prints the same warning. `/api/expiring?days=N` lists flat names whose
+prints the same warning under the same two conditions (the target really
+changed, and within the window; its `--handover-warn-days` defaults to
+the canister's 30). `/api/expiring?days=N` lists flat names whose
 balance runs out, or whose grace period ends, within N days, for holders
 and their tooling to poll.
 
