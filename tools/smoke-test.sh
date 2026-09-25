@@ -292,7 +292,10 @@ ocredit2=$(call credit "(principal \"$other\")" | tr -d '_ ()nat:')
 call flat_status "(\"$lapse\")" | grep >/dev/null '(null)'
 
 echo "--- gateway domains: admin sets them, /.well-known/ic-domains serves them"
-call set_domains '(vec { "names.example"; "bad host" })' | grep >/dev/null 'not a hostname'
+call set_domains '(vec { "names.example"; "bad host" })' | grep >/dev/null 'Err'
+call set_domains '(vec { "foo..example" })' | grep >/dev/null 'Err'
+call set_domains '(vec { "-foo.example" })' | grep >/dev/null 'Err'
+call set_domains '(vec { "example" })' | grep >/dev/null 'Err'
 call set_domains '(vec { "names.example"; "alt.names.example" })' | grep >/dev/null 'Ok'
 dfx canister call --identity smoke-other names set_domains '(vec {})' | grep >/dev/null 'not a controller'
 wk=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/.well-known/ic-domains")

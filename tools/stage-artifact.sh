@@ -15,7 +15,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if [ -n "$(git status --porcelain | grep -v '^?? deploy/' | grep -v '^ M deploy/')" ]; then
+# Same rule as tools/reproducible-build.sh: deploy/ is output, not input.
+if [ -n "$(git status --porcelain -- . ':!deploy')" ]; then
   echo "refusing to stage: the working tree has uncommitted changes outside deploy/." >&2
   exit 2
 fi

@@ -136,21 +136,13 @@ fn domains_inner() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Set the custom domains this canister claims. Each is a hostname: ASCII
-/// letters, digits, '-' and '.', no scheme or path. Admins only.
+/// Set the custom domains this canister claims. Each is a hostname
+/// (names::check_hostname), no scheme or path. Controllers only.
 #[ic_cdk::update]
 fn set_domains(domains: Vec<String>) -> Result<(), String> {
     admin()?;
     for d in &domains {
-        let ok = !d.is_empty()
-            && d.len() <= 253
-            && d.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
-            && !d.starts_with('.')
-            && !d.ends_with('.');
-        if !ok {
-            return Err(format!("'{d}' is not a hostname"));
-        }
+        names::check_hostname(d)?;
     }
     store::meta_set(DOMAINS_KEY, domains.join("\n").into_bytes());
     Ok(())
