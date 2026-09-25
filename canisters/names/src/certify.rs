@@ -178,12 +178,17 @@ mod tests {
         let http = fork(skip_tree(), pruned(names_hash()));
         assert_eq!(http.digest(), root_hash());
         assert_eq!(decode(&witness(&["alice/a"])).digest(), root_hash());
-        assert!(
-            matches!(
-                http.lookup_path([b"http_expr".as_slice(), b"<*>"]),
-                LookupResult::Found(_) | LookupResult::Error
-            ) || true
-        );
+        // The gateway looks up ["http_expr", "<*>", sha256(cel)] and must
+        // find the empty leaf; the names side is pruned, not revealed.
+        let cel_hash: Hash = Sha256::digest(SKIP_CEL.as_bytes()).into();
+        assert!(matches!(
+            http.lookup_path([b"http_expr".as_slice(), b"<*>", &cel_hash]),
+            LookupResult::Found(b"")
+        ));
+        assert!(matches!(
+            http.lookup_path([b"names".as_slice(), b"alice/a"]),
+            LookupResult::Unknown
+        ));
     }
 
     #[test]
