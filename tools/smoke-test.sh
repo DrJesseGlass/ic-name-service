@@ -29,7 +29,10 @@ echo "names canister      : $names"
 
 # A target to point at. The names canister itself will do.
 target=$names
-handle="smoke-$RANDOM"
+# Every name in a run carries the run's epoch second, so runs against the
+# same long-lived local canister never collide (RANDOM alone did).
+run=$(date +%s)
+handle="smoke-$run"
 
 call() { dfx canister call --identity "$id" names "$@"; }
 treasury_field() { call treasury | grep -o "$1 = [0-9_]*" | tr -d '_' | awk '{print $3}'; }
@@ -178,10 +181,10 @@ approve smoke-local
 approve smoke-other
 echo "--- the market is closed by default: claim and buy are refused"
 call harberger_config | grep >/dev/null 'flat_names_open = false' || call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 700 : nat32; min_price = 100_000_000_000; grace_ns = 2_592_000_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
-call claim "(\"closed$RANDOM\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'not open'
+call claim "(\"closed$run\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'not open'
 echo "--- fast tax for the test: 100 percent per year, 2 second grace, market open"
 call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
-flat="fl$RANDOM"
+flat="fl$run-a"
 echo "--- claim $flat -> $handle/app at 1T with a 100B deposit"
 call claim "(\"$flat\", \"nope\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'must alias a scoped name'
 call claim "(\"$flat\", \"$handle/app\", 1, 100_000_000_000)" | grep >/dev/null 'below the minimum'
@@ -206,7 +209,7 @@ dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\",
 call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$other\""
 echo "--- closing the market does not stop a buy of a held name"
 call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
-call claim "(\"closed$RANDOM\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'not open'
+call claim "(\"closed$run\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'not open'
 # Repoint at $handle/self, whose pinned module hash is the live one, so
 # the verifier's check E passes on the chain through this flat name.
 call buy "(\"$flat\", \"$handle/self\", 3_000_000_000_000, 100_000_000_000, 3_000_000_000_000)" | grep >/dev/null 'Ok'
@@ -251,7 +254,7 @@ call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 
 echo "--- a name whose deposit runs out lapses, then frees, then can be claimed"
 # At the maximum price (10^18) a 200B deposit is spent in about six seconds,
 # and the whole of it is tax: enough for fund_self to pay the ledger fee.
-lapse="fl$RANDOM"
+lapse="fl$run-b"
 call claim "(\"$lapse\", \"$handle/app\", 1_000_000_000_000_000_000, 200_000_000_000)" | grep >/dev/null 'Ok'
 sleep 10
 call flat_status "(\"$lapse\")" | grep >/dev/null 'status = variant { free }' || { echo "expected free after grace"; call flat_status "(\"$lapse\")"; exit 1; }
@@ -274,7 +277,7 @@ echo "--- a top-up must leave one grace period of tax: dust on an empty name is 
 # free at 20 s, so a check at about 14 s lands inside grace with room for
 # call latency on either side.
 call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 8_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
-dust="fl$RANDOM"
+dust="fl$run-c"
 call claim "(\"$dust\", \"$handle/app\", 1_000_000_000_000_000_000, 380_000_000_000)" | grep >/dev/null 'Ok'
 sleep 13
 call flat_status "(\"$dust\")" | grep >/dev/null 'grace = record' || { echo "expected grace"; call flat_status "(\"$dust\")"; exit 1; }
@@ -291,10 +294,9 @@ call flat_status "(\"$lapse\")" | grep >/dev/null '(null)'
 echo "--- gateway domains: admin sets them, /.well-known/ic-domains serves them"
 call set_domains '(vec { "names.example"; "bad host" })' | grep >/dev/null 'not a hostname'
 call set_domains '(vec { "names.example"; "alt.names.example" })' | grep >/dev/null 'Ok'
-dfx canister call --identity smoke-other names set_domains '(vec {})' | grep >/dev/null 'not a controller or an operator'
+dfx canister call --identity smoke-other names set_domains '(vec {})' | grep >/dev/null 'not a controller'
 wk=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/.well-known/ic-domains")
 [ "$wk" = "$(printf 'names.example\nalt.names.example\n')" ] || { echo "ic-domains wrong: [$wk]"; exit 1; }
-call list_operators | grep >/dev/null 'vec'
 
 echo "--- http gateway through the local dfx gateway"
 gw() { curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943$1"; }

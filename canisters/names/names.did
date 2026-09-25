@@ -203,15 +203,11 @@ service : {
   // stable memory layout version (store.rs SCHEMA); migrations key on it
   schema_version : () -> (nat32) query;
 
-  // admins are controllers and the operators baked in at build time
-  // (canisters/names/operators.txt)
-  list_operators : () -> (vec principal) query;
-
-  // custom domains served at /.well-known/ic-domains (admins)
+  // custom domains served at /.well-known/ic-domains (controllers)
   set_domains : (vec text) -> (Result);
   domains : () -> (vec text) query;
 
-  // deployers: admins list them; a listed deployer may announce
+  // deployers: controllers list them; a listed deployer may announce
   add_deployer : (principal) -> (Result);
   remove_deployer : (principal) -> (Result);
   list_deployers : () -> (vec principal) query;

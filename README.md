@@ -25,8 +25,6 @@ deployed; deployment will go through ic-git.
       src/gateway.rs         HTTP: /<name> -> 302, /api/* -> JSON
     tools/verify/            independent verifier of a resolve answer (own
                              cargo workspace; uses ic-agent)
-    canisters/names/operators.txt
-                             admin principals baked in at build time
     tools/stage-artifact.sh  Docker build, then copy the raw wasm to deploy/
     tools/check-module-hash.sh
                              live module hash vs the last verified.json entry
@@ -175,15 +173,13 @@ the canister's 30). `/api/expiring?days=N` lists flat names whose
 balance runs out, or whose grace period ends, within N days, for holders
 and their tooling to poll.
 
-## Operators and deployment through ic-git
+## Deployment through ic-git
 
 Admin methods (deployer list, tax config, treasury, gateway domains) are
-open to controllers and to the operators listed in
-canisters/names/operators.txt, which is compiled into the module. When
-ic-git installs the canister it is the controller, so the operators file
-is how the people running the service keep access; anyone can read the
-list from the source or with `list_operators`, and changing it changes
-the module hash.
+open to the canister's controllers. ic-git creates an app canister with
+the repo owner and itself as controllers, so whoever owns the repo on
+ic-git administers the name service it installs; nothing else needs to
+be configured for that.
 
 ic-git installs a committed raw wasm. `tools/stage-artifact.sh` builds
 in the pinned container and copies it to deploy/name_canister.wasm; commit
