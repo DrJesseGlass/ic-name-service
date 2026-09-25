@@ -45,6 +45,9 @@ fn post_upgrade() {
     if from < 2 {
         directory::rebuild();
     }
+    if from < 3 {
+        harberger::migrate_config_from_v2();
+    }
     store::set_schema_version(store::SCHEMA);
 }
 
@@ -526,6 +529,71 @@ fn snapshot(cfg: &HarbergerConfig, name: &str, now: u64) -> Option<(Record, u128
     Some((r, taken, snap))
 }
 
+/// Claiming is refused while the market is closed. Buying a held name is
+/// never gated: the forced sale is what keeps a holder's price honest
+/// (DESIGN.md section 5), so closing the market stops new names, not the
+/// pressure on existing ones. Everything a holder needs to keep or leave
+/// a name stays open too.
+fn market_open(cfg: &HarbergerConfig) -> Result<(), String> {
+    if cfg.flat_names_open {
+        Ok(())
+    } else {
+        Err("flat names are not open for claiming yet".to_string())
+    }
+}
+
+/// A flat name close to running out, for holders and their tooling.
+#[derive(CandidType, Clone, Debug)]
+pub struct Expiring {
+    pub name: String,
+    pub owner: Principal,
+    pub status: Status,
+    /// When the balance runs out (active) or the grace period ends (grace).
+    pub deadline_ns: u64,
+    /// Settled to now.
+    pub balance: u128,
+    pub tax_per_year: u128,
+}
+
+/// Flat names whose balance runs out, or whose grace period ends, within
+/// `within_ns` of now. Free names are not listed: they are gone. Sorted
+/// by deadline.
+pub fn expiring_inner(within_ns: u64) -> Vec<Expiring> {
+    let cfg = harberger::config();
+    let now = ic_cdk::api::time();
+    let mut out = Vec::new();
+    store::for_each_record(|r| {
+        let Some(h) = &r.flat else { return };
+        let mut h = h.clone();
+        let (status, _) = harberger::settle(&cfg, &mut h, now);
+        let deadline_ns = match &status {
+            Status::Active => match harberger::ns_until_spent(&cfg, h.price, h.balance) {
+                Some(ns) => now.saturating_add(ns),
+                None => return,
+            },
+            Status::Grace { until_ns } => *until_ns,
+            Status::Free => return,
+        };
+        if deadline_ns.saturating_sub(now) <= within_ns {
+            out.push(Expiring {
+                name: r.name.clone(),
+                owner: r.owner,
+                status,
+                deadline_ns,
+                balance: h.balance,
+                tax_per_year: harberger::tax_per_year(&cfg, h.price),
+            });
+        }
+    });
+    out.sort_by_key(|e| e.deadline_ns);
+    out
+}
+
+#[ic_cdk::query]
+fn expiring(within_ns: u64) -> Vec<Expiring> {
+    expiring_inner(within_ns)
+}
+
 #[derive(CandidType)]
 struct FlatStatus {
     name: String,
@@ -590,6 +658,7 @@ fn check_deposit(cfg: &HarbergerConfig, price: u128, deposit: u128) -> Result<()
 #[ic_cdk::update]
 async fn claim(name: String, alias_to: String, price: u128, deposit: u128) -> Result<(), String> {
     let cfg = harberger::config();
+    market_open(&cfg)?;
     let caller = caller()?;
     names::check_flat(&name)?;
     let target = Target::Alias(alias_to);
@@ -622,6 +691,7 @@ async fn claim(name: String, alias_to: String, price: u128, deposit: u128) -> Re
         Some((old, tax, _)) => (
             Record {
                 owner: caller,
+                previous_target: Some(old.target.clone()),
                 target,
                 text: Vec::new(),
                 updated_ns: now,
@@ -642,11 +712,19 @@ async fn claim(name: String, alias_to: String, price: u128, deposit: u128) -> Re
     Ok(())
 }
 
-/// Buy a held flat name at its assessed price. Pulls price plus `deposit`
-/// from the caller; the seller is credited the price and the unspent
-/// balance. The buyer assesses `price` for the name from here on.
+/// Buy a held flat name at its assessed price, if that price is at most
+/// `max_price` (what the buyer saw; the seller may have moved it since).
+/// Pulls price plus `deposit` from the caller; the seller is credited the
+/// price and the unspent balance. The buyer assesses `price` for the name
+/// from here on.
 #[ic_cdk::update]
-async fn buy(name: String, alias_to: String, price: u128, deposit: u128) -> Result<(), String> {
+async fn buy(
+    name: String,
+    alias_to: String,
+    price: u128,
+    deposit: u128,
+    max_price: u128,
+) -> Result<(), String> {
     let cfg = harberger::config();
     let caller = caller()?;
     names::check_flat(&name)?;
@@ -663,6 +741,12 @@ async fn buy(name: String, alias_to: String, price: u128, deposit: u128) -> Resu
         }
         if snap.owner == caller {
             return Err("you hold this name; use set_price".to_string());
+        }
+        if snap.price > max_price {
+            return Err(format!(
+                "price is now {} cycles, above your limit of {max_price}",
+                snap.price
+            ));
         }
         Ok((r, tax, snap))
     };
@@ -684,7 +768,7 @@ async fn buy(name: String, alias_to: String, price: u128, deposit: u128) -> Resu
     let unspent = r.flat.as_ref().map(|h| h.balance).unwrap_or(0);
     store::add_credit(&r.owner, before.price.saturating_add(unspent));
     r.owner = caller;
-    r.target = target;
+    r.previous_target = Some(std::mem::replace(&mut r.target, target));
     r.text.clear();
     r.updated_ns = now;
     r.changed_hands_ns = now;
@@ -973,12 +1057,7 @@ fn harberger_config() -> HarbergerConfig {
 
 #[ic_cdk::query]
 fn http_request(req: gateway::HttpRequest) -> gateway::HttpResponse {
-    gateway::handle(&req, false)
-}
-
-#[ic_cdk::update]
-fn http_request_update(req: gateway::HttpRequest) -> gateway::HttpResponse {
-    gateway::handle(&req, true)
+    gateway::handle(&req)
 }
 
 ic_cdk::export_candid!();

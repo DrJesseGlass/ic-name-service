@@ -73,6 +73,11 @@ pub struct Record {
     pub changed_hands_ns: u64,
     /// Present on flat names only.
     pub flat: Option<Harberger>,
+    /// What the name pointed at before it last changed hands (flat names:
+    /// a buy, or a claim of a lapsed name). With changed_hands_ns this is
+    /// what lets a gateway or client warn that a familiar name now leads
+    /// somewhere else (DESIGN.md section 5, the forced sale).
+    pub previous_target: Option<Target>,
 }
 
 impl Record {
@@ -87,6 +92,7 @@ impl Record {
             updated_ns: now,
             changed_hands_ns: now,
             flat: None,
+            previous_target: None,
         }
     }
 
@@ -131,6 +137,20 @@ impl Record {
             out.push_str(&format!("settled_ns={}\n", h.settled_ns));
             out.push_str(&format!("lapsed_ns={}\n", h.lapsed_ns.unwrap_or(0)));
         }
+        if let Some(prev) = &self.previous_target {
+            out.push_str("previous_target=");
+            match prev {
+                Target::Address(p) => {
+                    out.push_str("address:");
+                    out.push_str(&p.to_text());
+                }
+                Target::Alias(n) => {
+                    out.push_str("alias:");
+                    out.push_str(n);
+                }
+            }
+            out.push('\n');
+        }
         out.into_bytes()
     }
 }
@@ -159,7 +179,9 @@ const MEM_CREDITS: MemoryId = MemoryId::new(5);
 /// Layout version of stable memory. Bump it when an upgrade must run a
 /// migration in post_upgrade. 1: M0 (handles, records, deployers).
 /// 2: M1 adds the tag index, filled from existing records on first upgrade.
-pub const SCHEMA: u32 = 2;
+/// 3: the Harberger config gains flat_names_open and handover_warn_ns;
+/// a stored schema 2 config is rewritten in the new shape.
+pub const SCHEMA: u32 = 3;
 const SCHEMA_KEY: &str = "schema";
 
 /// A virtual memory for a map that lives in another module.
@@ -419,6 +441,7 @@ mod tests {
             updated_ns: 2,
             changed_hands_ns: 1,
             flat: None,
+            previous_target: None,
         }
     }
 
@@ -447,6 +470,7 @@ mod tests {
             settled_ns: 3,
             lapsed_ns: None,
         });
+        r.previous_target = Some(Target::Alias("bob/ic-git".into()));
         let want = "name=ic-git\n\
                     owner=2vxsx-fae\n\
                     target=alias:alice/ic-git\n\
@@ -456,7 +480,8 @@ mod tests {
                     price=1000000000000\n\
                     balance=5\n\
                     settled_ns=3\n\
-                    lapsed_ns=0\n";
+                    lapsed_ns=0\n\
+                    previous_target=alias:bob/ic-git\n";
         assert_eq!(String::from_utf8(r.canonical()).unwrap(), want);
     }
 

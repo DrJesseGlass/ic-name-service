@@ -45,7 +45,7 @@ call register_handle "(\"$handle\")" | grep >/dev/null 'Err' || { echo "expected
 echo "--- set_record $handle/app -> address $target"
 call set_record "(\"$handle/app\", variant { address = principal \"$target\" })" | grep >/dev/null 'Ok'
 echo "--- set_text description"
-call set_text "(\"$handle/app\", \"description\", opt \"smoke test app\")" | grep >/dev/null 'Ok'
+call set_text "(\"$handle/app\", \"description\", opt \"smoke test app $handle\")" | grep >/dev/null 'Ok'
 echo "--- set_record $handle/www -> alias $handle/app"
 call set_record "(\"$handle/www\", variant { alias = \"$handle/app\" })" | grep >/dev/null 'Ok'
 
@@ -131,7 +131,7 @@ call set_text "(\"$handle/app\", \"tags\", opt \"git,git\")" | grep >/dev/null '
 call set_text "(\"$handle/app\", \"tags\", opt \"git,smoke-$handle\")" | grep >/dev/null 'Ok'
 call tags | grep >/dev/null "smoke-$handle"
 echo "--- search by substring of the description"
-out=$(call search "(record { q = opt \"SMOKE TEST\" })")
+out=$(call search "(record { q = opt \"SMOKE TEST APP $handle\" })")
 echo "$out" | grep >/dev/null "$handle/app" || { echo "search by description failed:"; echo "$out"; exit 1; }
 echo "--- search by tag, paged"
 out=$(call search "(record { tag = opt \"smoke-$handle\"; limit = opt 1 })")
@@ -158,9 +158,13 @@ if ! dfx canister id cycles_ledger >/dev/null 2>&1 || ! dfx canister call --iden
   dfx deps deploy --identity "$id" >/dev/null 2>&1
 fi
 fund() { # fund <identity> <cycles>: deposit from the identity's local wallet
-  local who=$1 amount=$2 p
+  local who=$1 amount=$2 p wallet
   p=$(dfx identity get-principal --identity "$who")
-  dfx canister call --identity "$who" --wallet "$(dfx identity get-wallet --identity "$who")" \
+  wallet=$(dfx identity get-wallet --identity "$who")
+  # Local replica only: mint cycles into the wallet so repeated runs never
+  # drain it. (Refused on mainnet, where cycles are real.)
+  dfx ledger fabricate-cycles --identity "$who" --canister "$wallet" --t 100 >/dev/null 2>&1 || true
+  dfx canister call --identity "$who" --wallet "$wallet" \
     --with-cycles "$amount" $ledger deposit "(record { to = record { owner = principal \"$p\" } })" >/dev/null
 }
 approve() { # approve <identity>: let the names canister pull up to 10T
@@ -172,8 +176,11 @@ fund smoke-local 5000000000000
 fund smoke-other 5000000000000
 approve smoke-local
 approve smoke-other
-echo "--- fast tax for the test: 100 percent per year, 2 second grace"
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+echo "--- the market is closed by default: claim and buy are refused"
+call harberger_config | grep >/dev/null 'flat_names_open = false' || call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 700 : nat32; min_price = 100_000_000_000; grace_ns = 2_592_000_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+call claim "(\"closed$RANDOM\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'not open'
+echo "--- fast tax for the test: 100 percent per year, 2 second grace, market open"
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 flat="fl$RANDOM"
 echo "--- claim $flat -> $handle/app at 1T with a 100B deposit"
 call claim "(\"$flat\", \"nope\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'must alias a scoped name'
@@ -193,8 +200,38 @@ call set_price "(\"$flat\", 2_000_000_000_000)" | grep >/dev/null 'Ok'
 echo "--- buyer takes it at 2T, assessing 3T; seller is credited price plus unspent balance"
 other=$(dfx identity get-principal --identity smoke-other)
 credit0=$(call credit "(principal \"$me\")" | tr -d '_ ()nat:')
-dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'Ok'
+echo "--- a buy capped below the current price is refused"
+dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000, 1_000_000_000_000)" | grep >/dev/null 'above your limit'
+dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000, 2_000_000_000_000)" | grep >/dev/null 'Ok'
 call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$other\""
+echo "--- closing the market does not stop a buy of a held name"
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+call claim "(\"closed$RANDOM\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'not open'
+# Repoint at $handle/self, whose pinned module hash is the live one, so
+# the verifier's check E passes on the chain through this flat name.
+call buy "(\"$flat\", \"$handle/self\", 3_000_000_000_000, 100_000_000_000, 3_000_000_000_000)" | grep >/dev/null 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$me\""
+echo "--- the sold name remembers where it pointed, and the gateway warns instead of redirecting"
+call get_record "(\"$flat\")" | grep >/dev/null "previous_target = opt variant { alias = \"$handle/app\" }"
+page=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
+echo "$page" | grep >/dev/null "<h1>$flat changed hands</h1>" || { echo "no handover page:"; echo "$page" | head -5; exit 1; }
+echo "$page" | grep >/dev/null "Continue to $handle/self"
+echo "$page" | grep >/dev/null "Go to $handle/app instead"
+echo "--- the verifier warns about the recent change of target, and not outside its window"
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$flat" || true)
+echo "$out" | grep >/dev/null "^WARNING             : $flat changed hands" || { echo "verifier did not warn:"; echo "$out"; exit 1; }
+echo "$out" | grep >/dev/null '^VERIFIED' || { echo "sold name did not verify:"; echo "$out"; exit 1; }
+out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" --handover-warn-days 0 "$flat" || true)
+echo "$out" | grep >/dev/null '^WARNING' && { echo "verifier warned outside its window"; exit 1; }
+echo "$out" | grep >/dev/null '^VERIFIED' || { echo "sold name did not verify with a zero window:"; echo "$out"; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
+[ "$code" = 200 ] || { echo "handover page status $code"; exit 1; }
+echo "--- expiring lists the name with a deadline; a short window does not"
+call expiring "(1_000_000_000_000_000_000 : nat64)" | grep >/dev/null "name = \"$flat\""
+call expiring "(1 : nat64)" | grep >/dev/null "name = \"$flat\"" && { echo "expiring listed a name far from its deadline"; exit 1; }
+json=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/expiring?days=3650")
+echo "$json" | grep >/dev/null "\"name\":\"$flat\"" || { echo "api expiring wrong:"; echo "$json"; exit 1; }
 credit=$(( $(call credit "(principal \"$me\")" | tr -d '_ ()nat:') - credit0 ))
 [ "$credit" -gt 2000000000000 ] && [ "$credit" -le 2100000000000 ] || { echo "seller credit delta wrong: $credit"; exit 1; }
 echo "--- seller withdraws 1T of credit to the ledger"
@@ -204,12 +241,12 @@ after=$(bal "$me")
 [ $((after - before)) -eq $((1000000000000 - 100000000)) ] || { echo "withdraw moved $((after - before)), expected 1T minus the fee"; exit 1; }
 echo "--- the fee comes from the ledger, and the ledger cannot change while funds are held"
 call harberger_config | grep >/dev/null 'fee = 100_000_000 : nat'
-call set_harberger_config "(record { ledger = principal \"$names\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'funds are held'
+call set_harberger_config "(record { ledger = principal \"$names\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'funds are held'
 echo "--- a rate change settles every flat name first (collected tax grows)"
 c0=$(treasury_field collected)
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 9000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 9000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 [ "$(treasury_field collected)" -gt "$c0" ] || { echo "rate change did not settle"; exit 1; }
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 
 echo "--- a name whose deposit runs out lapses, then frees, then can be claimed"
 # At the maximum price (10^18) a 200B deposit is spent in about six seconds,
@@ -236,7 +273,7 @@ echo "--- a top-up must leave one grace period of tax: dust on an empty name is 
 # second. With an 8 second grace, a 12 second deposit lapses at 12 s and is
 # free at 20 s, so a check at about 14 s lands inside grace with room for
 # call latency on either side.
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 8_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 8_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 dust="fl$RANDOM"
 call claim "(\"$dust\", \"$handle/app\", 1_000_000_000_000_000_000, 380_000_000_000)" | grep >/dev/null 'Ok'
 sleep 13
@@ -244,7 +281,7 @@ call flat_status "(\"$dust\")" | grep >/dev/null 'grace = record' || { echo "exp
 call deposit "(\"$dust\", 1_000)" | grep >/dev/null 'one grace period of tax'
 call deposit "(\"$dust\", 400_000_000_000)" | grep >/dev/null 'Ok'
 call flat_status "(\"$dust\")" | grep >/dev/null 'status = variant { active }'
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0 })" | grep >/dev/null 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 ocredit=$(call credit "(principal \"$other\")" | tr -d '_ ()nat:')
 dfx canister call --identity smoke-other names delete_record "(\"$lapse\")" | grep >/dev/null 'Ok'
 ocredit2=$(call credit "(principal \"$other\")" | tr -d '_ ()nat:')
@@ -259,17 +296,19 @@ got=$(gw "/$handle/missing")
 [ "${got%% *}" = 404 ] || { echo "expected 404, got: $got"; exit 1; }
 got=$(gw "/")
 [ "${got%% *}" = 200 ] || { echo "index expected 200, got: $got"; exit 1; }
-echo "--- /api/resolve JSON carries certificate and witness (raw query)"
-json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/resolve/$handle/app")
+echo "--- /api/resolve JSON on the verifying host: certified query response"
+json=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/resolve/$handle/app")
+hdr=$(curl -s -D - -o /dev/null -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/resolve/$handle/app")
+echo "$hdr" | grep -i >/dev/null '^ic-certificateexpression:' || { echo "no IC-CertificateExpression header:"; echo "$hdr"; exit 1; }
 echo "$json" | grep >/dev/null "\"canister\":\"$target\"" || { echo "api json wrong:"; echo "$json"; exit 1; }
 echo "$json" | grep >/dev/null '"certificate":"' || { echo "api json lacks certificate"; exit 1; }
 echo "$json" | grep >/dev/null '"witness":"' || { echo "api json lacks witness"; exit 1; }
 echo "$json" | grep >/dev/null '"created_ns":"[0-9]*"' || { echo "api json timestamps must be decimal strings"; echo "$json"; exit 1; }
-echo "--- /api/search and /api/tags JSON (raw query)"
-json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/search?q=$handle&tag=deploy&limit=5")
+echo "--- /api/search and /api/tags JSON on the verifying host"
+json=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/search?q=$handle&tag=deploy&limit=5")
 echo "$json" | grep >/dev/null "\"name\":\"$handle/app\"" || { echo "api search wrong:"; echo "$json"; exit 1; }
 echo "$json" | grep >/dev/null '"updated_ns":"[0-9]*"' || { echo "api search timestamps must be strings"; echo "$json"; exit 1; }
-json=$(curl -s -H "Host: $names.raw.localhost:4943" "http://127.0.0.1:4943/api/tags")
+json=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/tags")
 echo "$json" | grep >/dev/null '"tag":"deploy"' || { echo "api tags wrong:"; echo "$json"; exit 1; }
 
 echo "--- upgrade keeps records, re-certifies, and lands on the current schema"
@@ -277,7 +316,7 @@ dfx deploy --yes --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
 out=$(call resolve "(\"$handle/app\")")
 echo "$out" | grep >/dev/null "canister = principal \"$target\"" || { echo "record lost across upgrade"; exit 1; }
 echo "$out" | grep >/dev/null 'certificate = opt blob' || { echo "no certificate after upgrade"; exit 1; }
-call schema_version | grep >/dev/null '(2 : nat32)' || { echo "schema not at 2 after upgrade"; exit 1; }
+call schema_version | grep >/dev/null '(3 : nat32)' || { echo "schema not at 3 after upgrade"; exit 1; }
 call search "(record { tag = opt \"deploy\" })" | grep >/dev/null "$handle/app" || { echo "tag index lost across upgrade"; exit 1; }
 
 echo "SMOKE OK"

@@ -10,14 +10,50 @@
 //! stable memory in post_upgrade. Cost is one pass over all records, which
 //! is fine at any scale this canister will see before delegation (M3)
 //! splits the namespace.
+//!
+//! HTTP responses are certified too, with a skip-certification expression
+//! (HTTP gateway protocol v2): the gateway checks that this canister, not
+//! a replica or boundary node, chose to serve the path uncertified. That
+//! subtree is static, so certified data is the fork of its digest and the
+//! names tree:
+//!
+//!   fork( labeled("http_expr", labeled("<*>", labeled(sha256(cel), leaf("")))),
+//!         labeled("names", <name tree>) )
+//!
+//! A names witness prunes the left side; an HTTP witness prunes the right.
+//! The shape matches what the ic-http-certification crate would build
+//! (its test vector is checked below), without taking the dependency.
 
 use ic_certification::{
-    labeled, labeled_hash, merge_hash_trees, pruned, AsHashTree, HashTree, RbTree,
+    fork, fork_hash, labeled, labeled_hash, leaf, merge_hash_trees, pruned, AsHashTree, Hash,
+    HashTree, RbTree,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 
 const LABEL: &[u8] = b"names";
+
+/// The CEL expression that tells the gateway to skip response
+/// certification for every path. Sent in IC-CertificateExpression.
+pub const SKIP_CEL: &str = "default_certification(ValidationArgs{no_certification:Empty{}})";
+
+fn skip_tree() -> HashTree {
+    let cel_hash: Hash = Sha256::digest(SKIP_CEL.as_bytes()).into();
+    labeled(
+        "http_expr",
+        labeled("<*>", labeled(cel_hash, leaf(Vec::new()))),
+    )
+}
+
+thread_local! {
+    /// The skip subtree never changes, so its digest is computed once.
+    static SKIP_DIGEST: Hash = skip_tree().digest();
+}
+
+fn skip_digest() -> Hash {
+    SKIP_DIGEST.with(|d| *d)
+}
 
 /// Alias chains longer than this fail to resolve. Answers the open question
 /// in DESIGN.md section 11 with a default; raise it if a real use needs more.
@@ -27,8 +63,13 @@ thread_local! {
     static TREE: RefCell<RbTree<Vec<u8>, Vec<u8>>> = const { RefCell::new(RbTree::new()) };
 }
 
-fn root_hash() -> [u8; 32] {
+fn names_hash() -> Hash {
     TREE.with(|t| labeled_hash(LABEL, &t.borrow().root_hash()))
+}
+
+/// The certified data: fork of the static HTTP subtree and the names tree.
+fn root_hash() -> Hash {
+    fork_hash(&skip_digest(), &names_hash())
 }
 
 /// Push the current root into certified data. No-op off the IC so unit
@@ -79,11 +120,42 @@ pub fn witness(names: &[&str]) -> Vec<u8> {
         }
         merged.unwrap_or_else(|| pruned(t.root_hash()))
     });
-    let tree = labeled(LABEL, tree);
+    let tree = fork(pruned(skip_digest()), labeled(LABEL, tree));
+    cbor(&tree)
+}
+
+fn cbor(value: &impl Serialize) -> Vec<u8> {
     let mut ser = serde_cbor::Serializer::new(Vec::new());
     ser.self_describe().expect("cbor self-describe");
-    tree.serialize(&mut ser).expect("cbor hash tree");
+    value.serialize(&mut ser).expect("cbor");
     ser.into_inner()
+}
+
+/// The two headers that make a query response acceptable to a verifying
+/// HTTP gateway: the certificate over the certified data and a witness
+/// whose left side is the whole (static) HTTP subtree and whose right
+/// side is the names tree pruned to its hash. None outside a query
+/// context, where there is no certificate to give.
+pub fn http_headers() -> Option<Vec<(String, String)>> {
+    let certificate = ic_cdk::api::data_certificate()?;
+    let witness = fork(skip_tree(), pruned(names_hash()));
+    let expr_path = ["http_expr", "<*>"];
+    let b64 = |b: &[u8]| {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(b)
+    };
+    Some(vec![
+        (
+            "IC-Certificate".to_string(),
+            format!(
+                "certificate=:{}:, tree=:{}:, expr_path=:{}:, version=2",
+                b64(&certificate),
+                b64(&cbor(&witness)),
+                b64(&cbor(&expr_path))
+            ),
+        ),
+        ("IC-CertificateExpression".to_string(), SKIP_CEL.to_string()),
+    ])
 }
 
 #[cfg(test)]
@@ -93,6 +165,35 @@ mod tests {
 
     fn decode(bytes: &[u8]) -> HashTree {
         serde_cbor::from_slice(bytes).unwrap()
+    }
+
+    #[test]
+    fn skip_subtree_matches_the_http_certification_crate() {
+        // ic-http-certification 4.0.0, utils/skip_certification.rs test
+        // vector for skip_certification_certified_data().
+        assert_eq!(
+            skip_digest(),
+            [
+                85, 236, 195, 28, 62, 128, 71, 252, 21, 143, 32, 234, 10, 160, 96, 154, 172, 199,
+                181, 126, 6, 234, 64, 220, 65, 134, 2, 114, 167, 214, 66, 145
+            ]
+        );
+        // The HTTP witness and a names witness digest to the same root.
+        set("alice/a", b"A".to_vec());
+        let http = fork(skip_tree(), pruned(names_hash()));
+        assert_eq!(http.digest(), root_hash());
+        assert_eq!(decode(&witness(&["alice/a"])).digest(), root_hash());
+        // The gateway looks up ["http_expr", "<*>", sha256(cel)] and must
+        // find the empty leaf; the names side is pruned, not revealed.
+        let cel_hash: Hash = Sha256::digest(SKIP_CEL.as_bytes()).into();
+        assert!(matches!(
+            http.lookup_path([b"http_expr".as_slice(), b"<*>", &cel_hash]),
+            LookupResult::Found(b"")
+        ));
+        assert!(matches!(
+            http.lookup_path([b"names".as_slice(), b"alice/a"]),
+            LookupResult::Unknown
+        ));
     }
 
     #[test]

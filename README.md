@@ -44,7 +44,9 @@ deployed; deployment will go through ic-git.
     add_deployer / remove_deployer : (principal) -> (Result) controllers only
     list_deployers  : () -> (vec principal) query
     announce        : (Announcement) -> (Result)            listed deployers only
-    claim / buy     : (text, text, nat, nat) -> (Result)     flat name, alias_to, price, deposit
+    claim           : (text, text, nat, nat) -> (Result)     flat name, alias_to, price, deposit
+    buy             : (text, text, nat, nat, nat) -> (Result) plus max_price, the buyer's cap
+    expiring        : (nat64) -> (vec Expiring) query       names running out within ns
     deposit         : (text, nat) -> (Result)               top up a flat name
     set_price       : (text, nat) -> (Result)               reassess a held flat name
     flat_status     : (text) -> (opt FlatStatus) query      settled to now
@@ -53,7 +55,6 @@ deployed; deployment will go through ic-git.
     search          : (SearchQuery) -> (SearchResult) query  substring and tag, paged
     tags            : () -> (vec TagCount) query
     http_request    : (HttpRequest) -> (HttpResponse) query
-    http_request_update : (HttpRequest) -> (HttpResponse)
 
 Writes require the caller to own the handle. Resolution visits at most 8
 records (the name plus 7 alias hops) and refuses loops.
@@ -86,6 +87,14 @@ Anyone may buy the name at the assessed price at any time. The seller is
 credited the price plus the unspent balance and withdraws it to the cycles
 ledger when they like. When the balance runs out the name enters a grace
 period (30 days by default), after which it is free to claim.
+
+The market is closed by default: `flat_names_open` in the config gates
+new claims, so a release can ship scoped names alone and open flat names
+later. Buying a held name is never gated, because the forced sale is what
+keeps a holder's price honest; closing the market stops new names, not
+the pressure on existing ones. Holders can always top up, reassess,
+withdraw and release. A buy carries a `max_price`, the price the buyer
+saw, and is refused if the seller has since moved above it.
 
 Payments are ICRC-2 pulls from the caller's cycles ledger account, so a
 caller first approves this canister as a spender for the amount plus the
@@ -138,14 +147,27 @@ the announced code fails verification instead of silently routing.
     GET /api/resolve/<handle>/<label>  the certified answer as JSON
     GET /api/search?q=&tag=&offset=&limit=   directory search as JSON
     GET /api/tags                      tags in use with counts
+    GET /api/expiring?days=N           flat names running out within N days
     GET /                              usage
 
-HTTP responses are not certified yet. The redirect, the index, search and
-tags ask the gateway to upgrade the call to an update, so they work on any
-domain. The resolve JSON endpoint cannot, because the certificate inside
-the body only exists in a query, so it is served as a plain query: use a
-`raw` gateway domain or a direct replica request, and verify the body.
-Certifying the HTTP responses themselves is the M1 follow-up.
+Every response is a query response with the IC-Certificate and
+IC-CertificateExpression headers carrying a skip-certification expression
+(HTTP gateway protocol v2). The gateway verifies that this canister, not a
+replica or boundary node, chose to serve the path uncertified, so the
+routes work on any gateway domain with no update call. Certified data is
+the fork of that static HTTP subtree and the names tree; the resolve JSON
+body still carries its own certificate and witness for clients that want
+proof of the answer itself.
+
+After a flat name changes hands, `/<flat>` serves a plain HTML page for
+the configured window (30 days by default) instead of redirecting: it
+names the date, the old target and the new one, and links to both. The
+record keeps `previous_target`, which is certified, and the verifier
+prints the same warning under the same two conditions (the target really
+changed, and within the window; its `--handover-warn-days` defaults to
+the canister's 30). `/api/expiring?days=N` lists flat names whose
+balance runs out, or whose grace period ends, within N days, for holders
+and their tooling to poll.
 
 ## Certified resolution
 

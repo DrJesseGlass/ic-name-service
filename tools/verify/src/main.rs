@@ -64,6 +64,7 @@ struct Record {
     updated_ns: u64,
     changed_hands_ns: u64,
     flat: Option<Harberger>,
+    previous_target: Option<Target>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -96,6 +97,12 @@ fn canonical(r: &Record) -> Vec<u8> {
         s.push_str(&format!("settled_ns={}\n", h.settled_ns));
         s.push_str(&format!("lapsed_ns={}\n", h.lapsed_ns.unwrap_or(0)));
     }
+    if let Some(prev) = &r.previous_target {
+        match prev {
+            Target::Address(p) => s.push_str(&format!("previous_target=address:{}\n", p.to_text())),
+            Target::Alias(n) => s.push_str(&format!("previous_target=alias:{n}\n")),
+        }
+    }
     s.into_bytes()
 }
 
@@ -105,12 +112,16 @@ struct Opts {
     name: String,
     tamper: Option<String>,
     insecure_local_root_key: bool,
+    /// Warn about a change of hands this recent. Matches the gateway's
+    /// handover_warn_ns default; the canister's own setting is in
+    /// harberger_config.
+    handover_warn_days: u64,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: names-verify --canister <id> [--url <replica url>] [--insecure-local-root-key] \
-         [--tamper witness|record] <handle>/<label>"
+         [--handover-warn-days N] [--tamper witness|record] <name>"
     );
     std::process::exit(2);
 }
@@ -121,6 +132,7 @@ fn parse_args() -> Opts {
     let mut name = None;
     let mut tamper = None;
     let mut insecure_local_root_key = false;
+    let mut handover_warn_days = 30u64;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -134,6 +146,12 @@ fn parse_args() -> Opts {
             }
             "--tamper" => tamper = Some(args.next().unwrap_or_else(|| usage())),
             "--insecure-local-root-key" => insecure_local_root_key = true,
+            "--handover-warn-days" => {
+                handover_warn_days = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| usage());
+            }
             "-h" | "--help" => usage(),
             _ if a.starts_with('-') => usage(),
             _ => name = Some(a),
@@ -145,6 +163,7 @@ fn parse_args() -> Opts {
         name: name.unwrap_or_else(|| usage()),
         tamper,
         insecure_local_root_key,
+        handover_warn_days,
     }
 }
 
@@ -311,6 +330,36 @@ async fn main() {
         ),
     }
     println!("D chain             : ok");
+    // Not a check, a warning: a name that changed hands recently and now
+    // points somewhere else may lead its old users astray (DESIGN.md
+    // section 5). Same two conditions as the gateway's warning page: the
+    // target actually changed, and the change is within the window.
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let warn_ns = opts.handover_warn_days.saturating_mul(86_400_000_000_000);
+    for r in &resolved.chain {
+        let Some(prev) = &r.previous_target else {
+            continue;
+        };
+        let same = match (prev, &r.target) {
+            (Target::Alias(a), Target::Alias(b)) => a == b,
+            (Target::Address(a), Target::Address(b)) => a == b,
+            _ => false,
+        };
+        if !same && now_ns.saturating_sub(r.changed_hands_ns) < warn_ns {
+            let days = now_ns.saturating_sub(r.changed_hands_ns) / 86_400_000_000_000;
+            println!(
+                "WARNING             : {} changed hands {days} day(s) ago; it used to point at {}",
+                r.name,
+                match prev {
+                    Target::Address(p) => format!("address {}", p.to_text()),
+                    Target::Alias(n) => n.clone(),
+                }
+            );
+        }
+    }
 
     // E. module hash pin.
     match last.text.iter().find(|(k, _)| k == "module_hash") {

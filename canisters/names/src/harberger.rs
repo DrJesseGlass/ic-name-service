@@ -37,6 +37,14 @@ pub struct Config {
     /// config was set. Pinned on every transfer so a changed fee fails the
     /// transfer instead of quietly over-debiting this canister's account.
     pub fee: u128,
+    /// Whether new flat names may be claimed. Closed by default, so a
+    /// release can ship scoped names alone and open the market later.
+    /// Buying a held name is never gated, and holders can always top up,
+    /// reassess, withdraw and release.
+    pub flat_names_open: bool,
+    /// How long after a flat name changes hands the gateway interposes a
+    /// warning page instead of redirecting.
+    pub handover_warn_ns: u64,
 }
 
 impl Default for Config {
@@ -47,14 +55,58 @@ impl Default for Config {
             min_price: 100_000_000_000,
             grace_ns: 30 * 24 * 60 * 60 * 1_000_000_000,
             fee: 100_000_000,
+            flat_names_open: false,
+            handover_warn_ns: 30 * 24 * 60 * 60 * 1_000_000_000,
         }
     }
 }
 
+/// The stored config, or the default when none was ever set. A stored
+/// blob that does not decode is a bug (a schema change without its
+/// migration in post_upgrade), not a reason to run on defaults: the
+/// ledger, rate and pinned fee would change silently.
 pub fn config() -> Config {
-    store::meta_get(CONFIG_KEY)
-        .and_then(|b| candid::decode_one::<Config>(&b).ok())
-        .unwrap_or_default()
+    match store::meta_get(CONFIG_KEY) {
+        None => Config::default(),
+        Some(b) => candid::decode_one::<Config>(&b).expect("decode harberger config"),
+    }
+}
+
+/// The config as schema 2 (M2) wrote it: no market flag, no handover
+/// window. Kept only to migrate it.
+#[derive(CandidType, Deserialize)]
+struct ConfigV2 {
+    ledger: Principal,
+    rate_bps: u32,
+    min_price: u128,
+    grace_ns: u64,
+    fee: u128,
+}
+
+/// Rewrite a schema 2 config in the current shape. The M2 market had no
+/// gate, so it stays open: an upgrade must not change who may buy a name
+/// that is already held. Runs from post_upgrade; a no-op when nothing is
+/// stored or it already decodes.
+pub fn migrate_config_from_v2() {
+    let Some(b) = store::meta_get(CONFIG_KEY) else {
+        return;
+    };
+    if candid::decode_one::<Config>(&b).is_ok() {
+        return;
+    }
+    let old: ConfigV2 = candid::decode_one(&b).expect("decode schema 2 harberger config");
+    let c = Config {
+        ledger: old.ledger,
+        rate_bps: old.rate_bps,
+        min_price: old.min_price,
+        grace_ns: old.grace_ns,
+        fee: old.fee,
+        // Closed, like a fresh deploy: the flag only stops new claims, so
+        // names held at upgrade time stay buyable and taxed as before.
+        flat_names_open: false,
+        ..Config::default()
+    };
+    store::meta_set(CONFIG_KEY, candid::encode_one(&c).expect("encode Config"));
 }
 
 pub fn set_config(c: Config) -> Result<(), String> {
@@ -91,7 +143,7 @@ pub fn tax(cfg: &Config, price: u128, elapsed_ns: u64) -> u128 {
 
 /// Nanoseconds until `balance` is spent on the tax on `price`, or None
 /// when the tax rate is zero (never).
-fn ns_until_spent(cfg: &Config, price: u128, balance: u128) -> Option<u64> {
+pub fn ns_until_spent(cfg: &Config, price: u128, balance: u128) -> Option<u64> {
     let per_year = tax_per_year(cfg, price);
     if per_year == 0 {
         return None;
@@ -303,6 +355,32 @@ mod tests {
         c.grace_ns = 1;
         c.min_price = MAX_PRICE + 1;
         assert!(set_config(c).is_err());
+    }
+
+    #[test]
+    fn schema_2_config_migrates_with_its_values_kept() {
+        let old = ConfigV2 {
+            ledger: Principal::from_text("aaaaa-aa").unwrap(),
+            rate_bps: 500,
+            min_price: 7,
+            grace_ns: 9,
+            fee: 11,
+        };
+        store::meta_set(CONFIG_KEY, candid::encode_one(&old).unwrap());
+        // The old bytes do not decode as the current shape.
+        assert!(candid::decode_one::<Config>(&store::meta_get(CONFIG_KEY).unwrap()).is_err());
+        migrate_config_from_v2();
+        let c = config();
+        assert_eq!(c.ledger, old.ledger);
+        assert_eq!(c.rate_bps, 500);
+        assert_eq!(c.min_price, 7);
+        assert_eq!(c.grace_ns, 9);
+        assert_eq!(c.fee, 11);
+        assert!(!c.flat_names_open);
+        assert_eq!(c.handover_warn_ns, Config::default().handover_warn_ns);
+        // Idempotent, and a current config is left alone.
+        migrate_config_from_v2();
+        assert_eq!(config(), c);
     }
 
     #[test]
