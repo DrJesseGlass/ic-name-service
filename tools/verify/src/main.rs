@@ -64,6 +64,7 @@ struct Record {
     updated_ns: u64,
     changed_hands_ns: u64,
     flat: Option<Harberger>,
+    previous_target: Option<Target>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -95,6 +96,12 @@ fn canonical(r: &Record) -> Vec<u8> {
         s.push_str(&format!("balance={}\n", h.balance));
         s.push_str(&format!("settled_ns={}\n", h.settled_ns));
         s.push_str(&format!("lapsed_ns={}\n", h.lapsed_ns.unwrap_or(0)));
+    }
+    if let Some(prev) = &r.previous_target {
+        match prev {
+            Target::Address(p) => s.push_str(&format!("previous_target=address:{}\n", p.to_text())),
+            Target::Alias(n) => s.push_str(&format!("previous_target=alias:{n}\n")),
+        }
     }
     s.into_bytes()
 }
@@ -311,6 +318,25 @@ async fn main() {
         ),
     }
     println!("D chain             : ok");
+    // Not a check, a warning: a name that changed hands recently may lead
+    // somewhere its old users do not expect (DESIGN.md section 5).
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    for r in &resolved.chain {
+        if let Some(prev) = &r.previous_target {
+            let days = now_ns.saturating_sub(r.changed_hands_ns) / 86_400_000_000_000;
+            println!(
+                "WARNING             : {} changed hands {days} day(s) ago; it used to point at {}",
+                r.name,
+                match prev {
+                    Target::Address(p) => format!("address {}", p.to_text()),
+                    Target::Alias(n) => n.clone(),
+                }
+            );
+        }
+    }
 
     // E. module hash pin.
     match last.text.iter().find(|(k, _)| k == "module_hash") {

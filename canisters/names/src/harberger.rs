@@ -37,6 +37,13 @@ pub struct Config {
     /// config was set. Pinned on every transfer so a changed fee fails the
     /// transfer instead of quietly over-debiting this canister's account.
     pub fee: u128,
+    /// Whether claim and buy are open. Closed by default, so a release can
+    /// ship scoped names alone and open the market later. Holders can
+    /// still top up, reassess, withdraw and release while it is closed.
+    pub flat_names_open: bool,
+    /// How long after a flat name changes hands the gateway interposes a
+    /// warning page instead of redirecting.
+    pub handover_warn_ns: u64,
 }
 
 impl Default for Config {
@@ -47,6 +54,8 @@ impl Default for Config {
             min_price: 100_000_000_000,
             grace_ns: 30 * 24 * 60 * 60 * 1_000_000_000,
             fee: 100_000_000,
+            flat_names_open: false,
+            handover_warn_ns: 30 * 24 * 60 * 60 * 1_000_000_000,
         }
     }
 }
@@ -91,7 +100,7 @@ pub fn tax(cfg: &Config, price: u128, elapsed_ns: u64) -> u128 {
 
 /// Nanoseconds until `balance` is spent on the tax on `price`, or None
 /// when the tax rate is zero (never).
-fn ns_until_spent(cfg: &Config, price: u128, balance: u128) -> Option<u64> {
+pub fn ns_until_spent(cfg: &Config, price: u128, balance: u128) -> Option<u64> {
     let per_year = tax_per_year(cfg, price);
     if per_year == 0 {
         return None;
