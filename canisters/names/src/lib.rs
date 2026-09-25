@@ -10,13 +10,13 @@ mod certify;
 mod directory;
 mod gateway;
 mod harberger;
-mod ledger;
 mod names;
 mod store;
 
 use candid::{CandidType, Principal};
 use directory::{SearchQuery, SearchResult, TagCount};
 use harberger::{Config as HarbergerConfig, Status};
+use ic_auction::ledger;
 use store::{Handle, Harberger, Record, Target};
 
 // --- lifecycle --------------------------------------------------------------
@@ -740,12 +740,7 @@ async fn claim(name: String, alias_to: String, price: u128, deposit: u128) -> Re
         ),
         None => (Record::new(name, caller, target, now), 0),
     };
-    r.flat = Some(Harberger {
-        price,
-        balance: deposit,
-        settled_ns: now,
-        lapsed_ns: None,
-    });
+    r.flat = Some(Harberger::new(price, deposit, now));
     commit_flat(r, tax);
     Ok(())
 }
@@ -810,12 +805,7 @@ async fn buy(
     r.text.clear();
     r.updated_ns = now;
     r.changed_hands_ns = now;
-    r.flat = Some(Harberger {
-        price,
-        balance: deposit,
-        settled_ns: now,
-        lapsed_ns: None,
-    });
+    r.flat = Some(Harberger::new(price, deposit, now));
     commit_flat(r, tax);
     Ok(())
 }

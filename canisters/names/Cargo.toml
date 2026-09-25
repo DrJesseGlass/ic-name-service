@@ -12,6 +12,13 @@ ic-cdk = "0.20"
 candid = "0.10"
 ic-stable-structures = "0.7"
 
+# The allocation mechanisms (DESIGN.md section 5) and the cycles ledger
+# client, shared with the other canisters. A path dependency while the
+# crate settles; switch to a crates.io or git tag pin before a release,
+# or the reproducible build (git archive, no sibling checkout) cannot see
+# it.
+ic-auction = { path = "../../../ic-auction", features = ["candid", "icrc"] }
+
 # Certified resolution (DESIGN.md section 3): an in-heap hash tree over the
 # name map whose root goes into certified data, so a query answer can carry
 # a subnet-signed witness. serde_cbor encodes the witness the way agents

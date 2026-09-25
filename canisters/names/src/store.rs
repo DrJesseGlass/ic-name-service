@@ -47,18 +47,10 @@ impl Storable for Handle {
     const BOUND: Bound = Bound::Unbounded;
 }
 
-/// Harberger state of a flat name (DESIGN.md section 5). All amounts are
-/// cycles. `balance` is the prepaid tax as of `settled_ns`; harberger.rs
-/// settles lazily on every read and write.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Harberger {
-    /// Self-assessed price. Anyone may buy the name for this.
-    pub price: u128,
-    pub balance: u128,
-    pub settled_ns: u64,
-    /// When the balance ran out, if it has; the grace period runs from here.
-    pub lapsed_ns: Option<u64>,
-}
+/// Harberger state of a flat name (DESIGN.md section 5): price, prepaid
+/// balance, settlement time, lapse time. The rules are in the ic-auction
+/// crate; the canister stores the record and settles lazily.
+pub use ic_auction::harberger::Harberger;
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Record {

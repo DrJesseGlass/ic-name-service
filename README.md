@@ -20,8 +20,7 @@ deployed; deployment will go through ic-git.
       src/store.rs           stable-memory handles, records, deployer list
       src/certify.rs         hash tree over records, certified data, witnesses
       src/directory.rs       tag index and search
-      src/harberger.rs       tax arithmetic, lazy settlement, config
-      src/ledger.rs          cycles ledger client (ICRC-1, ICRC-2)
+      src/harberger.rs       config, tax counters; the rules come from ic-auction
       src/gateway.rs         HTTP: /<name> -> 302, /api/* -> JSON
     tools/verify/            independent verifier of a resolve answer (own
                              cargo workspace; uses ic-agent)
@@ -80,6 +79,14 @@ announced as `<handle>/<repo>`, and a refused or failed announce is noted
 in the deploy status without failing the deploy.
 
 ## Flat names and the Harberger tax
+
+The tax arithmetic, lazy settlement and the ICRC ledger client live in
+the ic-auction crate (../ic-auction, a sibling repository), shared like
+ic-multisig is. This canister keeps the config, the records, the escrow
+and the counters. ic-auction is a path dependency while it settles; pin
+it to a crates.io release or a git tag before a release build, since the
+reproducible build works from a git archive and cannot see a sibling
+checkout.
 
 A flat name (`ic-git`, one segment) is scarce and marketable. It always
 aliases a scoped name, so a sale never changes what the scoped identity
