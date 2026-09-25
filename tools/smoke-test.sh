@@ -288,6 +288,14 @@ ocredit2=$(call credit "(principal \"$other\")" | tr -d '_ ()nat:')
 [ "$ocredit2" -gt "$ocredit" ] || { echo "release did not credit the balance"; exit 1; }
 call flat_status "(\"$lapse\")" | grep >/dev/null '(null)'
 
+echo "--- gateway domains: admin sets them, /.well-known/ic-domains serves them"
+call set_domains '(vec { "names.example"; "bad host" })' | grep >/dev/null 'not a hostname'
+call set_domains '(vec { "names.example"; "alt.names.example" })' | grep >/dev/null 'Ok'
+dfx canister call --identity smoke-other names set_domains '(vec {})' | grep >/dev/null 'not a controller or an operator'
+wk=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/.well-known/ic-domains")
+[ "$wk" = "$(printf 'names.example\nalt.names.example\n')" ] || { echo "ic-domains wrong: [$wk]"; exit 1; }
+call list_operators | grep >/dev/null 'vec'
+
 echo "--- http gateway through the local dfx gateway"
 gw() { curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943$1"; }
 got=$(gw "/$handle/app")

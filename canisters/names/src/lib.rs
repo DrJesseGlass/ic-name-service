@@ -106,13 +106,81 @@ fn check_flat_target(target: &Target) -> Result<(), String> {
     }
 }
 
-/// Controllers administer the deployer list.
+/// The operators baked into this module (canisters/names/operators.txt).
+/// Parsed on first use; a bad line traps, which a unit test rules out.
+fn operators() -> &'static [Principal] {
+    static OPERATORS: std::sync::OnceLock<Vec<Principal>> = std::sync::OnceLock::new();
+    OPERATORS.get_or_init(|| parse_operators(include_str!("../operators.txt")))
+}
+
+fn parse_operators(text: &str) -> Vec<Principal> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| Principal::from_text(l).unwrap_or_else(|e| panic!("operators.txt: {l}: {e}")))
+        .collect()
+}
+
+fn is_operator(p: &Principal) -> bool {
+    operators().contains(p)
+}
+
+/// Controllers and the baked-in operators administer the canister: the
+/// deployer list, the tax config, the treasury, the gateway domains.
 fn admin() -> Result<Principal, String> {
     let c = caller()?;
-    if !ic_cdk::api::is_controller(&c) {
-        return Err("caller is not a controller".to_string());
+    if !ic_cdk::api::is_controller(&c) && !is_operator(&c) {
+        return Err("caller is not a controller or an operator".to_string());
     }
     Ok(c)
+}
+
+#[ic_cdk::query]
+fn list_operators() -> Vec<Principal> {
+    operators().to_vec()
+}
+
+// --- gateway domains (DESIGN.md section 6, stage 1) --------------------------
+//
+// The boundary nodes register a custom domain for a canister only if the
+// canister lists it at /.well-known/ic-domains. The list lives in META.
+
+const DOMAINS_KEY: &str = "domains";
+
+fn domains_inner() -> Vec<String> {
+    store::meta_get(DOMAINS_KEY)
+        .map(|b| {
+            String::from_utf8_lossy(&b)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Set the custom domains this canister claims. Each is a hostname: ASCII
+/// letters, digits, '-' and '.', no scheme or path. Admins only.
+#[ic_cdk::update]
+fn set_domains(domains: Vec<String>) -> Result<(), String> {
+    admin()?;
+    for d in &domains {
+        let ok = !d.is_empty()
+            && d.len() <= 253
+            && d.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+            && !d.starts_with('.')
+            && !d.ends_with('.');
+        if !ok {
+            return Err(format!("'{d}' is not a hostname"));
+        }
+    }
+    store::meta_set(DOMAINS_KEY, domains.join("\n").into_bytes());
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn domains() -> Vec<String> {
+    domains_inner()
 }
 
 /// Write a record everywhere it lives: the tag index, the certified tree
@@ -1058,6 +1126,29 @@ fn harberger_config() -> HarbergerConfig {
 #[ic_cdk::query]
 fn http_request(req: gateway::HttpRequest) -> gateway::HttpResponse {
     gateway::handle(&req)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn operators_file_parses() {
+        // The committed file must parse, or every admin call would trap.
+        let ops = parse_operators(include_str!("../operators.txt"));
+        for p in &ops {
+            assert_ne!(*p, Principal::anonymous());
+        }
+        let parsed = parse_operators("# comment\n\n 2vxsx-fae \numobs-yiaaa-aaaab-agyrq-cai\n");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], Principal::anonymous());
+    }
+
+    #[test]
+    #[should_panic(expected = "operators.txt")]
+    fn bad_operator_line_panics() {
+        parse_operators("not-a-principal\n");
+    }
 }
 
 ic_cdk::export_candid!();

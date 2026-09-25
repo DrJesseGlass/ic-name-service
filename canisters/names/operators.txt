@@ -1,0 +1,11 @@
+# Operators of this canister, one principal per line. Baked into the
+# module at build time (lib.rs, include_str!), so the list is part of the
+# reproducible hash and anyone can see who can administer the canister.
+#
+# Why a file and not a controller check alone: when ic-git installs this
+# canister, ic-git is the controller. The people who run the name service
+# still need to list deployers, set the tax config, and move collected
+# tax, so they are named here. Controllers keep their access too.
+#
+# Lines starting with '#' and blank lines are ignored. Changing this file
+# changes the module hash; re-attest after a change.
