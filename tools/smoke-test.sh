@@ -45,7 +45,7 @@ call register_handle "(\"$handle\")" | grep >/dev/null 'Err' || { echo "expected
 echo "--- set_record $handle/app -> address $target"
 call set_record "(\"$handle/app\", variant { address = principal \"$target\" })" | grep >/dev/null 'Ok'
 echo "--- set_text description"
-call set_text "(\"$handle/app\", \"description\", opt \"smoke test app\")" | grep >/dev/null 'Ok'
+call set_text "(\"$handle/app\", \"description\", opt \"smoke test app $handle\")" | grep >/dev/null 'Ok'
 echo "--- set_record $handle/www -> alias $handle/app"
 call set_record "(\"$handle/www\", variant { alias = \"$handle/app\" })" | grep >/dev/null 'Ok'
 
@@ -131,7 +131,7 @@ call set_text "(\"$handle/app\", \"tags\", opt \"git,git\")" | grep >/dev/null '
 call set_text "(\"$handle/app\", \"tags\", opt \"git,smoke-$handle\")" | grep >/dev/null 'Ok'
 call tags | grep >/dev/null "smoke-$handle"
 echo "--- search by substring of the description"
-out=$(call search "(record { q = opt \"SMOKE TEST\" })")
+out=$(call search "(record { q = opt \"SMOKE TEST APP $handle\" })")
 echo "$out" | grep >/dev/null "$handle/app" || { echo "search by description failed:"; echo "$out"; exit 1; }
 echo "--- search by tag, paged"
 out=$(call search "(record { tag = opt \"smoke-$handle\"; limit = opt 1 })")
@@ -158,9 +158,13 @@ if ! dfx canister id cycles_ledger >/dev/null 2>&1 || ! dfx canister call --iden
   dfx deps deploy --identity "$id" >/dev/null 2>&1
 fi
 fund() { # fund <identity> <cycles>: deposit from the identity's local wallet
-  local who=$1 amount=$2 p
+  local who=$1 amount=$2 p wallet
   p=$(dfx identity get-principal --identity "$who")
-  dfx canister call --identity "$who" --wallet "$(dfx identity get-wallet --identity "$who")" \
+  wallet=$(dfx identity get-wallet --identity "$who")
+  # Local replica only: mint cycles into the wallet so repeated runs never
+  # drain it. (Refused on mainnet, where cycles are real.)
+  dfx ledger fabricate-cycles --identity "$who" --canister "$wallet" --t 100 >/dev/null 2>&1 || true
+  dfx canister call --identity "$who" --wallet "$wallet" \
     --with-cycles "$amount" $ledger deposit "(record { to = record { owner = principal \"$p\" } })" >/dev/null
 }
 approve() { # approve <identity>: let the names canister pull up to 10T
@@ -203,22 +207,24 @@ call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$other\""
 echo "--- closing the market does not stop a buy of a held name"
 call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 call claim "(\"closed$RANDOM\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000)" | grep >/dev/null 'not open'
-call buy "(\"$flat\", \"$handle/pushed\", 3_000_000_000_000, 100_000_000_000, 3_000_000_000_000)" | grep >/dev/null 'Ok'
+# Repoint at $handle/self, whose pinned module hash is the live one, so
+# the verifier's check E passes on the chain through this flat name.
+call buy "(\"$flat\", \"$handle/self\", 3_000_000_000_000, 100_000_000_000, 3_000_000_000_000)" | grep >/dev/null 'Ok'
 call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$me\""
 echo "--- the sold name remembers where it pointed, and the gateway warns instead of redirecting"
 call get_record "(\"$flat\")" | grep >/dev/null "previous_target = opt variant { alias = \"$handle/app\" }"
 page=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
 echo "$page" | grep >/dev/null "<h1>$flat changed hands</h1>" || { echo "no handover page:"; echo "$page" | head -5; exit 1; }
-echo "$page" | grep >/dev/null "Continue to $handle/pushed"
+echo "$page" | grep >/dev/null "Continue to $handle/self"
 echo "$page" | grep >/dev/null "Go to $handle/app instead"
 echo "--- the verifier warns about the recent change of target, and not outside its window"
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$flat" || true)
 echo "$out" | grep >/dev/null "^WARNING             : $flat changed hands" || { echo "verifier did not warn:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null '^VERIFIED'
+echo "$out" | grep >/dev/null '^VERIFIED' || { echo "sold name did not verify:"; echo "$out"; exit 1; }
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" --handover-warn-days 0 "$flat" || true)
 echo "$out" | grep >/dev/null '^WARNING' && { echo "verifier warned outside its window"; exit 1; }
-echo "$out" | grep >/dev/null '^VERIFIED'
+echo "$out" | grep >/dev/null '^VERIFIED' || { echo "sold name did not verify with a zero window:"; echo "$out"; exit 1; }
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
 [ "$code" = 200 ] || { echo "handover page status $code"; exit 1; }
 echo "--- expiring lists the name with a deadline; a short window does not"
