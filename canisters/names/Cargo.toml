@@ -13,11 +13,10 @@ candid = "0.10"
 ic-stable-structures = "0.7"
 
 # The allocation mechanisms (DESIGN.md section 5) and the cycles ledger
-# client, shared with the other canisters. A path dependency while the
-# crate settles; switch to a crates.io or git tag pin before a release,
-# or the reproducible build (git archive, no sibling checkout) cannot see
-# it.
-ic-auction = { path = "../../../ic-auction", features = ["candid", "icrc"] }
+# client, shared with the other canisters. From crates.io; Cargo.lock pins
+# the exact version and the registry checksum, so the reproducible build
+# resolves it from a clean archive.
+ic-auction = { version = "0.1.0", features = ["candid", "icrc"] }
 
 # Certified resolution (DESIGN.md section 3): an in-heap hash tree over the
 # name map whose root goes into certified data, so a query answer can carry
