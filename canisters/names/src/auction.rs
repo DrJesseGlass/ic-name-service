@@ -84,13 +84,24 @@ fn reserve(cfg: &HarbergerConfig, a: &Config) -> u128 {
     a.reserve.max(cfg.min_price)
 }
 
+/// What a revealed bidder gets if they win, fixed when they reveal so a
+/// config change between reveal and close cannot move the terms a
+/// deposit was checked against.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Terms {
+    /// The scoped name the flat name will alias.
+    pub alias_to: String,
+    /// One grace period of tax at the bid, under the config at reveal:
+    /// the name's opening balance, kept out of the winner's refund.
+    pub opening_balance: u128,
+}
+
 /// One auction, as stored.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Running {
     pub auction: Auction,
-    /// The scoped name each revealed bidder wants the flat name to alias,
-    /// keyed by the bidder's principal bytes.
-    pub targets: Vec<(Vec<u8>, String)>,
+    /// Terms per revealed bidder, keyed by the bidder's principal bytes.
+    pub targets: Vec<(Vec<u8>, Terms)>,
 }
 
 impl Storable for Running {
@@ -264,7 +275,8 @@ pub fn reveal(
         .find(|x| x.bidder == b)
         .map(|x| x.deposit)
         .unwrap_or(0);
-    let need = amount.saturating_add(harberger::min_deposit(cfg, amount));
+    let opening_balance = harberger::min_deposit(cfg, amount);
+    let need = amount.saturating_add(opening_balance);
     if deposit < need {
         return Err(format!(
             "the deposit of {deposit} cycles must cover the bid plus one grace period of tax at it: {need}"
@@ -272,7 +284,13 @@ pub fn reveal(
     }
     r.auction = auction;
     r.targets.retain(|(x, _)| x != b);
-    r.targets.push((b.to_vec(), alias_to));
+    r.targets.push((
+        b.to_vec(),
+        Terms {
+            alias_to,
+            opening_balance,
+        },
+    ));
     put(name, r);
     Ok(())
 }
@@ -312,7 +330,11 @@ pub fn close(cfg: &HarbergerConfig, name: &str, now: u64) -> Result<Closed, Stri
     let winner = outcome.winner.clone().filter(|_| free);
     let price = if winner.is_some() { outcome.price } else { 0 };
 
-    // Work out the winner's holding before anything is written.
+    // Work out the winner's holding before anything is written. The
+    // assessed price is the winner's own bid and the opening balance is
+    // what their reveal fixed; the config at close plays no part, so a
+    // min_price, rate or grace change since the reveal cannot assess the
+    // winner above what they committed to or underfund the holding.
     let holding = match &winner {
         None => None,
         Some(w) => {
@@ -323,14 +345,13 @@ pub fn close(cfg: &HarbergerConfig, name: &str, now: u64) -> Result<Closed, Stri
                 .find(|b| &b.bidder == w)
                 .and_then(|b| b.revealed)
                 .ok_or("winner has no revealed bid")?;
-            let alias = r
+            let terms = r
                 .targets
                 .iter()
                 .find(|(b, _)| b == w)
                 .map(|(_, t)| t.clone())
                 .ok_or("winner revealed no target")?;
-            let assessed = bid.clamp(cfg.min_price, MAX_PRICE);
-            Some((Principal::from_slice(w), alias, assessed))
+            Some((Principal::from_slice(w), terms, bid))
         }
     };
 
@@ -340,9 +361,13 @@ pub fn close(cfg: &HarbergerConfig, name: &str, now: u64) -> Result<Closed, Stri
         let who = Principal::from_slice(&s.bidder);
         forfeited = forfeited.saturating_add(s.forfeited);
         let refund = if Some(&s.bidder) == winner.as_ref() {
-            // Keep one grace period of tax as the opening balance.
-            let assessed = holding.as_ref().map(|h| h.2).unwrap_or(0);
-            opening_balance = s.refund.min(harberger::min_deposit(cfg, assessed));
+            // The refund is deposit minus price, and the reveal required
+            // deposit >= bid + opening balance with price <= bid, so the
+            // opening balance always fits; min is only a guard.
+            opening_balance = holding
+                .as_ref()
+                .map(|h| h.1.opening_balance.min(s.refund))
+                .unwrap_or(0);
             s.refund - opening_balance
         } else if Some(&s.bidder) == outcome.winner.as_ref() {
             // A voided win: the price was never charged.
@@ -354,9 +379,9 @@ pub fn close(cfg: &HarbergerConfig, name: &str, now: u64) -> Result<Closed, Stri
     }
 
     let mut assessed = 0;
-    if let Some((owner, alias, a)) = holding {
-        assessed = a;
-        let target = Target::Alias(alias);
+    if let Some((owner, terms, bid)) = holding {
+        assessed = bid;
+        let target = Target::Alias(terms.alias_to);
         let (mut rec, tax) = match lapsed {
             Some((old, tax)) => (
                 Record {
@@ -493,7 +518,13 @@ mod tests {
         a.commit(4, vec![1, 2], [7; 32], 5).unwrap();
         let r = Running {
             auction: a,
-            targets: vec![(vec![1, 2], "alice/app".into())],
+            targets: vec![(
+                vec![1, 2],
+                Terms {
+                    alias_to: "alice/app".into(),
+                    opening_balance: 6,
+                },
+            )],
         };
         assert_eq!(
             Running::from_bytes(Cow::Owned(r.to_bytes().into_owned())),
@@ -622,6 +653,28 @@ mod tests {
         assert_eq!(out.winner, None);
         assert!(store::get_record("low").is_none());
         assert_eq!(store::credit_of(&a), 5 * T);
+    }
+
+    #[test]
+    fn terms_are_fixed_at_reveal_not_at_close() {
+        setup();
+        let c = cfg();
+        let a = p(1);
+        commit("fixed", a, 5 * T, 20 * T, 0);
+        reveal(&c, "fixed", a, 5 * T, b"salt", "alice/app".into(), 150 * S).unwrap();
+        let opening = harberger::min_deposit(&c, 5 * T);
+        // A harsher config lands between reveal and close.
+        let later = HarbergerConfig {
+            min_price: 8 * T,
+            grace_ns: 1_000 * S,
+            ..c.clone()
+        };
+        let out = close(&later, "fixed", 200 * S).unwrap();
+        assert_eq!((out.winner, out.price, out.assessed), (Some(a), T, 5 * T));
+        let h = store::get_record("fixed").unwrap().flat.unwrap();
+        assert_eq!(h.price, 5 * T);
+        assert_eq!(h.balance, opening);
+        assert_eq!(store::credit_of(&a), 20 * T - T - opening);
     }
 
     #[test]
