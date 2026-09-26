@@ -219,10 +219,12 @@ other=$(dfx identity get-principal --identity smoke-other)
 echo "--- the market is closed by default: bidding is refused"
 call harberger_config | grep >/dev/null 'flat_names_open = false' || call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 700 : nat32; min_price = 100_000_000_000; grace_ns = 2_592_000_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
 bid_as smoke-local "closed$run" 1_000_000_000_000 1_100_000_000_000 x | grep >/dev/null 'not open'
-echo "--- fast tax and auctions for the test: 100 percent per year, 2 second grace, 10+15 second phases, market open"
-harb_cfg 10000 2 true
-auction_cfg 10 15
-call auction_config | grep >/dev/null 'commit_ns = 10_000_000_000'
+echo "--- fast tax and auctions for the test: 100 percent per year, 10 second grace, 15+30 second phases, market open"
+# Phases and grace are wall-clock; they are generous because the local
+# replica is shared, and another project's tests can slow every call.
+harb_cfg 10000 10 true
+auction_cfg 15 30
+call auction_config | grep >/dev/null 'commit_ns = 15_000_000_000'
 flat="fl$run-a"
 echo "--- auction $flat: bad bids are refused before any pull"
 call bid "(\"$flat\", blob \"short\", 1_100_000_000_000)" | grep >/dev/null '32 bytes'
@@ -237,7 +239,7 @@ echo "$out" | grep >/dev/null "principal \"$me\"" && echo "$out" | grep >/dev/nu
 reveal_as smoke-local "$flat" 1_000_000_000_000 s-a "$handle/app" | grep >/dev/null 'not started'
 call auctions | grep >/dev/null "name = \"$flat\""
 echo "--- closing the market stops new bids, not reveals or the close"
-harb_cfg 10000 2 false
+harb_cfg 10000 10 false
 bid_as smoke-other "fl$run-z" 400_000_000_000 500_000_000_000 s-z | grep >/dev/null 'not open'
 wait_phase "$flat" reveal
 call close_auction "(\"$flat\")" | grep >/dev/null 'still open'
@@ -326,7 +328,7 @@ call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 
 echo "--- a name whose deposit runs out lapses, frees, and goes back to auction"
 lapse="fl$run-b"
 # One or two bids per auction from here on: shorter phases.
-auction_cfg 8 6
+auction_cfg 10 10
 # $id wins alone at the reserve; smoke-other commits and never reveals.
 bid_as smoke-other "$lapse" 5_000_000_000 5_000_000_000 s-never | grep >/dev/null 'Ok'
 win smoke-local "$lapse" "$handle/app" 2_000_000_000 10_000_000_000
@@ -337,9 +339,13 @@ call flat_status "(\"$lapse\")" | grep >/dev/null 'status = variant { free }' ||
 call resolve "(\"$lapse\")" | grep >/dev/null 'has lapsed'
 call deposit "(\"$lapse\", 1_000_000)" | grep >/dev/null 'bid for it instead'
 call buy "(\"$lapse\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000, 1_000_000_000_000_000_000)" | grep >/dev/null 'bid for it instead'
+# A longer grace, so the top-up below lands before the opening balance and
+# its grace run out.
+harb_cfg 10000 10 true
 win smoke-other "$lapse" "$handle/self" 1_000_000_000_000 1_100_000_000_000
 echo "--- top up keeps a name active"
-dfx canister call --identity smoke-other names deposit "(\"$lapse\", 1_000_000_000)" | grep >/dev/null 'Ok'
+out=$(dfx canister call --identity smoke-other names deposit "(\"$lapse\", 1_000_000_000)")
+echo "$out" | grep >/dev/null 'Ok' || { echo "top-up after the re-sale failed: $out"; exit 1; }
 out=$(call get_record "(\"$lapse\")")
 echo "$out" | grep >/dev/null "owner = principal \"$other\"" || { echo "lapsed name not re-sold:"; echo "$out"; exit 1; }
 echo "$out" | grep >/dev/null "previous_target = opt variant { alias = \"$handle/app\" }" || { echo "re-sold name forgot its target:"; echo "$out"; exit 1; }
