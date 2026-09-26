@@ -801,13 +801,21 @@ async fn deposit(name: String, amount: u128) -> Result<(), String> {
             ));
         }
     };
-    if let Some(h) = r.flat.as_mut() {
-        h.balance = h.balance.saturating_add(amount);
-        h.lapsed_ns = None;
-        h.settled_ns = now;
-    }
+    // Already settled to now by payable, so this takes no further tax
+    // unless the crate carries a sub-cycle remainder; count it all the same.
+    let topped = match r.flat.as_mut() {
+        Some(h) => harberger::top_up(&cfg, h, amount, now),
+        None => Err(format!("'{name}' is not a flat name")),
+    };
+    let more = match topped {
+        Ok(more) => more,
+        Err(e) => {
+            store::add_credit(&caller, amount);
+            return Err(format!("{e}; amount credited back"));
+        }
+    };
     r.updated_ns = now;
-    commit_flat(r, tax);
+    commit_flat(r, tax.saturating_add(more));
     Ok(())
 }
 
@@ -1059,6 +1067,10 @@ async fn fund_self(amount: u128) -> Result<u128, String> {
         Err(f) => {
             if f.nothing_moved() {
                 harberger::undo_tax_withdrawn(amount);
+            } else if let ledger::Failure::FeeCharged(_) = f {
+                // The cycles came back to the account; only the fee was
+                // spent, and it came out of tax like a successful call's.
+                harberger::undo_tax_withdrawn(amount - cfg.fee);
             } else {
                 harberger::note_unreconciled(
                     amount,

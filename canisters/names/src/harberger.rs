@@ -153,6 +153,13 @@ pub fn settle(cfg: &Config, h: &mut Harberger, now: u64) -> (Status, u128) {
     h.settle(&cfg.params(), now)
 }
 
+/// Add `amount` to the prepaid balance, settling to `now` first. Returns
+/// the tax that settle took, for `note_tax_collected` on commit. Refuses a
+/// free holding, and one the top-up would leave below a grace period of tax.
+pub fn top_up(cfg: &Config, h: &mut Harberger, amount: u128, now: u64) -> Result<u128, String> {
+    h.top_up(&cfg.params(), amount, now)
+}
+
 /// Settle a flat record in place. Returns the status and the tax taken,
 /// which the caller reports with `note_tax_collected` when, and only
 /// when, it commits the settled record: the counter must track what the
