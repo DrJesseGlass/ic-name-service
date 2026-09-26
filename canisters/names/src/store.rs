@@ -167,6 +167,9 @@ const MEM_DEPLOYERS: MemoryId = MemoryId::new(2);
 pub const MEM_TAGS: MemoryId = MemoryId::new(3);
 const MEM_META: MemoryId = MemoryId::new(4);
 const MEM_CREDITS: MemoryId = MemoryId::new(5);
+/// Used by auction.rs for running auctions. Starts empty, so adding it
+/// needed no migration.
+pub const MEM_AUCTIONS: MemoryId = MemoryId::new(6);
 
 /// Layout version of stable memory. Bump it when an upgrade must run a
 /// migration in post_upgrade. 1: M0 (handles, records, deployers).
