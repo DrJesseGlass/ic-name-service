@@ -47,18 +47,10 @@ impl Storable for Handle {
     const BOUND: Bound = Bound::Unbounded;
 }
 
-/// Harberger state of a flat name (DESIGN.md section 5). All amounts are
-/// cycles. `balance` is the prepaid tax as of `settled_ns`; harberger.rs
-/// settles lazily on every read and write.
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Harberger {
-    /// Self-assessed price. Anyone may buy the name for this.
-    pub price: u128,
-    pub balance: u128,
-    pub settled_ns: u64,
-    /// When the balance ran out, if it has; the grace period runs from here.
-    pub lapsed_ns: Option<u64>,
-}
+/// Harberger state of a flat name (DESIGN.md section 5): price, prepaid
+/// balance, settlement time, lapse time. The rules are in the ic-auction
+/// crate; the canister stores the record and settles lazily.
+pub use ic_auction::harberger::Harberger;
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Record {
@@ -175,6 +167,9 @@ const MEM_DEPLOYERS: MemoryId = MemoryId::new(2);
 pub const MEM_TAGS: MemoryId = MemoryId::new(3);
 const MEM_META: MemoryId = MemoryId::new(4);
 const MEM_CREDITS: MemoryId = MemoryId::new(5);
+/// Used by auction.rs for running auctions. Starts empty, so adding it
+/// needed no migration.
+pub const MEM_AUCTIONS: MemoryId = MemoryId::new(6);
 
 /// Layout version of stable memory. Bump it when an upgrade must run a
 /// migration in post_upgrade. 1: M0 (handles, records, deployers).

@@ -117,7 +117,7 @@ type TagCount = record { tag : text; count : nat32 };
 type Status = variant {
   active;
   grace : record { until_ns : nat64 };  // balance gone; owner keeps it until then
-  free;                                 // anyone may claim
+  free;                                 // up for auction
 };
 
 type FlatStatus = record {
@@ -128,7 +128,7 @@ type FlatStatus = record {
   balance : nat;         // settled to now
   status : Status;
   tax_per_year : nat;
-  min_deposit : nat;     // least deposit for a claim or buy at this price
+  min_deposit : nat;     // least deposit for a buy at this price
   changed_hands_ns : nat64;
 };
 
@@ -138,7 +138,7 @@ type HarbergerConfig = record {
   min_price : nat;       // cycles
   grace_ns : nat64;
   fee : nat;             // the ledger's transfer fee as it answered when set; pinned on transfers
-  flat_names_open : bool;    // new claims allowed; false by default; buy is never gated
+  flat_names_open : bool;    // new bids allowed; false by default; buy, reveal, close never gated
   handover_warn_ns : nat64;  // gateway shows a warning page this long after a sale
 };
 
@@ -151,9 +151,42 @@ type Expiring = record {
   tax_per_year : nat;
 };
 
+// Sealed-bid second-price auctions for free flat names (never held,
+// released, or lapsed past grace). The first bid opens one; phases are
+// fixed when it opens.
+type AuctionConfig = record {
+  commit_ns : nat64;     // commit phase, from the first commitment
+  reveal_ns : nat64;     // reveal phase, after it
+  reserve : nat;         // least a winner pays; min_price applies too (the larger wins)
+};
+
+type Phase = variant { commit; reveal; closed };
+
+type AuctionView = record {
+  name : text;
+  phase : Phase;
+  opened_ns : nat64;
+  commit_until_ns : nat64;
+  reveal_until_ns : nat64;
+  reserve : nat;
+  bidders : vec principal;   // every commitment, in order
+  revealed : nat32;
+  winner : opt principal;    // once ended: who close_auction makes the holder
+  price : opt nat;           // and what they pay
+};
+
+type Closed = record {
+  winner : opt principal;
+  price : nat;           // second-highest revealed bid, or the reserve; 0 if nobody won
+  assessed : nat;        // the winner's own bid, their Harberger price from here on
+  forfeited : nat;       // deposits of unrevealed commitments
+};
+
 type Treasury = record {
-  collected : nat;
+  collected : nat;       // tax settled plus auction proceeds
   withdrawn : nat;
+  auctioned : nat;       // the part of collected from auction prices and forfeits
+  escrowed : nat;        // deposits held in auctions not yet closed
   // cycles whose movement a ledger reply left unconfirmed; never spent
   unreconciled : nat;
   unreconciled_last : text;
@@ -162,6 +195,7 @@ type Treasury = record {
 type Result = variant { Ok; Err : text };
 type ResolveResult = variant { Ok : Resolved; Err : text };
 type NatResult = variant { Ok : nat; Err : text };
+type CloseResult = variant { Ok : Closed; Err : text };
 
 service : {
   // handles: <handle> in <handle>/<label>; free, permanent, first come
@@ -182,7 +216,6 @@ service : {
 
   // flat names (DESIGN.md section 5). Payments are ICRC-2 pulls from the
   // caller's cycles ledger account: approve this canister first.
-  claim : (text, text, nat, nat) -> (Result);      // name, alias_to, price, deposit
   buy : (text, text, nat, nat, nat) -> (Result);   // name, alias_to, price, deposit, max_price
   deposit : (text, nat) -> (Result);               // name, amount
   set_price : (text, nat) -> (Result);
@@ -196,6 +229,21 @@ service : {
   // rate change, refuses a ledger change while funds are held
   set_harberger_config : (HarbergerConfig) -> (Result);
   harberger_config : () -> (HarbergerConfig) query;
+
+  // auctions for free flat names. bid needs the market open; reveal and
+  // close never do. The winner assesses at their bid, pays the second
+  // price, and starts with one grace period of tax as balance; the rest of
+  // every deposit is credited. An unrevealed commitment forfeits.
+  bid : (text, blob, nat) -> (Result);             // name, commitment (32 bytes), deposit
+  reveal : (text, nat, blob, text) -> (Result);    // name, amount, salt, alias_to
+  close_auction : (text) -> (CloseResult);         // anyone, after the reveal phase
+  auction_status : (text) -> (opt AuctionView) query;
+  auctions : () -> (vec AuctionView) query;
+  // sha256("ic-auction/vickrey/v1" || u64be len || bidder bytes ||
+  // u128be amount || u64be len || salt). Tests only: asking sends your bid.
+  auction_commitment : (principal, nat, blob) -> (blob) query;
+  set_auction_config : (AuctionConfig) -> (Result);  // controllers
+  auction_config : () -> (AuctionConfig) query;
 
   // directory
   search : (SearchQuery) -> (SearchResult) query;

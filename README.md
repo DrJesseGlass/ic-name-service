@@ -20,8 +20,7 @@ deployed; deployment will go through ic-git.
       src/store.rs           stable-memory handles, records, deployer list
       src/certify.rs         hash tree over records, certified data, witnesses
       src/directory.rs       tag index and search
-      src/harberger.rs       tax arithmetic, lazy settlement, config
-      src/ledger.rs          cycles ledger client (ICRC-1, ICRC-2)
+      src/harberger.rs       config, tax counters; the rules come from ic-auction
       src/gateway.rs         HTTP: /<name> -> 302, /api/* -> JSON
     tools/verify/            independent verifier of a resolve answer (own
                              cargo workspace; uses ic-agent)
@@ -47,7 +46,10 @@ deployed; deployment will go through ic-git.
     add_deployer / remove_deployer : (principal) -> (Result) controllers only
     list_deployers  : () -> (vec principal) query
     announce        : (Announcement) -> (Result)            listed deployers only
-    claim           : (text, text, nat, nat) -> (Result)     flat name, alias_to, price, deposit
+    bid             : (text, blob, nat) -> (Result)          sealed bid for a free flat name: commitment, deposit
+    reveal          : (text, nat, blob, text) -> (Result)    amount, salt, alias_to
+    close_auction   : (text) -> (CloseResult)                anyone, once the reveal phase is over
+    auction_status / auctions                               running auctions, amounts sealed until ended
     buy             : (text, text, nat, nat, nat) -> (Result) plus max_price, the buyer's cap
     expiring        : (nat64) -> (vec Expiring) query       names running out within ns
     deposit         : (text, nat) -> (Result)               top up a flat name
@@ -81,6 +83,12 @@ in the deploy status without failing the deploy.
 
 ## Flat names and the Harberger tax
 
+The tax arithmetic, lazy settlement, the Vickrey auction and the ICRC
+ledger client live in the ic-auction crate, taken from crates.io like
+ic-multisig is; Cargo.lock pins the version and the registry checksum.
+This canister keeps the config, the records, the escrow and the
+counters.
+
 A flat name (`ic-git`, one segment) is scarce and marketable. It always
 aliases a scoped name, so a sale never changes what the scoped identity
 means. The holder self-assesses a price and prepays a balance in cycles;
@@ -89,11 +97,30 @@ default) and is settled lazily on every read and write, with no timers.
 Anyone may buy the name at the assessed price at any time. The seller is
 credited the price plus the unspent balance and withdraws it to the cycles
 ledger when they like. When the balance runs out the name enters a grace
-period (30 days by default), after which it is free to claim.
+period (30 days by default), after which it is free again.
+
+A free flat name (never held, released, or lapsed past its grace period)
+is sold by sealed-bid second-price auction, from the ic-auction crate's
+Vickrey rules, not given to whoever calls first. The first `bid` on a free
+name opens the auction: a bidder commits
+sha256("ic-auction/vickrey/v1", bidder, amount, salt) with a deposit
+pulled into escrow, reveals amount, salt and the scoped name to alias in
+the reveal phase, and anyone calls `close_auction` once that is over (the
+next bid on an ended, unwon name closes it too; no timers). The highest
+revealed bid at or above the reserve wins and pays the second-highest, or
+the reserve. The winner holds the name assessed at their own bid, so a
+reveal must be covered by a deposit of the bid plus one grace period of
+tax at it; that grace period of tax becomes the name's opening balance and
+the rest of the deposit is credited. Losers are credited their deposits.
+An unrevealed commitment forfeits its deposit. Price and forfeits go to
+the treasury. Phases (3 days commit, 2 reveal) and the reserve (at least
+`min_price`) come from `set_auction_config` and are fixed when an auction
+opens. A lapsed name sold this way records its old target as
+`previous_target`, like a buy.
 
 The market is closed by default: `flat_names_open` in the config gates
-new claims, so a release can ship scoped names alone and open flat names
-later. Buying a held name is never gated, because the forced sale is what
+new bids, so a release can ship scoped names alone and open flat names
+later. Revealing and closing an auction already running are never gated. Buying a held name is never gated, because the forced sale is what
 keeps a holder's price honest; closing the market stops new names, not
 the pressure on existing ones. Holders can always top up, reassess,
 withdraw and release. A buy carries a `max_price`, the price the buyer
@@ -101,7 +128,7 @@ saw, and is refused if the seller has since moved above it.
 
 Payments are ICRC-2 pulls from the caller's cycles ledger account, so a
 caller first approves this canister as a spender for the amount plus the
-ledger fee. A claim or buy must deposit at least one grace period of tax
+ledger fee. A buy must deposit at least one grace period of tax
 at the assessed price, and a top-up must leave at least that much, so a
 name is never held on credit. There is a
 minimum price and a maximum, and a reserved name list (`api`). Collected

@@ -255,6 +255,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "ic-auction"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e12fc972f530756582217b5844a4fee3970108246997e4d98d5c2e1a0ca83335"
+dependencies = [
+ "candid",
+ "ic-cdk",
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "ic-cdk"
 version = "0.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -387,6 +399,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "candid",
+ "ic-auction",
  "ic-cdk",
  "ic-certification",
  "ic-stable-structures",

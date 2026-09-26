@@ -7,14 +7,19 @@
 //! `grace_ns` it is free to claim. Anyone may buy the name at P at any
 //! time; the seller gets P plus the unspent balance as a credit.
 //!
-//! No timers, no per-name bookkeeping beyond three numbers. All the money
-//! movement is in ledger.rs; this module is arithmetic and rules.
+//! The arithmetic and rules live in the ic-auction crate
+//! (ic_auction::harberger); this module holds what is this canister's:
+//! the stored config (ledger, fee, market flag, warning window, plus the
+//! crate's Params), the tax counters, and the unreconciled ledger
+//! amounts. The functions below are thin wrappers so the endpoints read
+//! the same as before the extraction.
 
 use crate::store::{self, Harberger, Record};
 use candid::{CandidType, Principal};
+use ic_auction::harberger::Params;
+pub use ic_auction::harberger::{Status, MAX_PRICE};
 use serde::Deserialize;
 
-const YEAR_NS: u128 = 365 * 24 * 60 * 60 * 1_000_000_000;
 const CONFIG_KEY: &str = "harberger";
 const TAX_COLLECTED_KEY: &str = "tax_collected";
 const TAX_WITHDRAWN_KEY: &str = "tax_withdrawn";
@@ -45,6 +50,17 @@ pub struct Config {
     /// How long after a flat name changes hands the gateway interposes a
     /// warning page instead of redirecting.
     pub handover_warn_ns: u64,
+}
+
+impl Config {
+    /// The crate's view of this config: the three numbers the tax needs.
+    pub fn params(&self) -> Params {
+        Params {
+            rate_bps: self.rate_bps,
+            min_price: self.min_price,
+            grace_ns: self.grace_ns,
+        }
+    }
 }
 
 impl Default for Config {
@@ -110,15 +126,7 @@ pub fn migrate_config_from_v2() {
 }
 
 pub fn set_config(c: Config) -> Result<(), String> {
-    if c.rate_bps > 10_000 {
-        return Err("rate_bps above 10000 (100% per year)".to_string());
-    }
-    if c.min_price > MAX_PRICE {
-        return Err(format!("min_price above the maximum price of {MAX_PRICE}"));
-    }
-    if c.grace_ns == 0 {
-        return Err("grace_ns is zero: every name would be free at once".to_string());
-    }
+    c.params().check()?;
     store::meta_set(
         CONFIG_KEY,
         candid::encode_one(&c).map_err(|e| e.to_string())?,
@@ -126,78 +134,30 @@ pub fn set_config(c: Config) -> Result<(), String> {
     Ok(())
 }
 
-/// Prices above this are refused: 10^18 cycles, a million T cycles, far
-/// beyond any name and small enough that the tax over any u64 interval
-/// fits u128 with room to spare.
-pub const MAX_PRICE: u128 = 1_000_000_000_000_000_000;
-
-/// Tax on `price` over `elapsed_ns` at the configured rate. Computed as
-/// the yearly tax first so the product stays small; saturates rather than
-/// overflowing for inputs outside MAX_PRICE.
-pub fn tax(cfg: &Config, price: u128, elapsed_ns: u64) -> u128 {
-    tax_per_year(cfg, price)
-        .checked_mul(elapsed_ns as u128)
-        .map(|x| x / YEAR_NS)
-        .unwrap_or(u128::MAX)
-}
-
-/// Nanoseconds until `balance` is spent on the tax on `price`, or None
-/// when the tax rate is zero (never).
-pub fn ns_until_spent(cfg: &Config, price: u128, balance: u128) -> Option<u64> {
-    let per_year = tax_per_year(cfg, price);
-    if per_year == 0 {
-        return None;
-    }
-    let ns = balance.checked_mul(YEAR_NS)? / per_year;
-    Some(ns.min(u64::MAX as u128) as u64)
-}
-
-/// Tax per year on `price`.
 pub fn tax_per_year(cfg: &Config, price: u128) -> u128 {
-    price.saturating_mul(cfg.rate_bps as u128) / 10_000
+    cfg.params().tax_per_year(price)
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum Status {
-    /// Balance covers the tax so far.
-    #[serde(rename = "active")]
-    Active,
-    /// Balance ran out; the owner keeps the name until `until_ns`.
-    #[serde(rename = "grace")]
-    Grace { until_ns: u64 },
-    /// Grace over: anyone may claim the name.
-    #[serde(rename = "free")]
-    Free,
+pub fn ns_until_spent(cfg: &Config, price: u128, balance: u128) -> Option<u64> {
+    cfg.params().ns_until_spent(price, balance)
+}
+
+/// The smallest deposit accepted when claiming or buying: the tax for one
+/// grace period, so a name is never held on credit.
+pub fn min_deposit(cfg: &Config, price: u128) -> u128 {
+    cfg.params().min_deposit(price)
 }
 
 /// Settle tax up to `now` in place. Returns the status and the tax taken.
 pub fn settle(cfg: &Config, h: &mut Harberger, now: u64) -> (Status, u128) {
-    let mut taken = 0u128;
-    if h.lapsed_ns.is_none() && now > h.settled_ns {
-        let due = tax(cfg, h.price, now - h.settled_ns);
-        if due <= h.balance {
-            h.balance -= due;
-            taken = due;
-        } else {
-            // Balance ran out somewhere in the interval; find when.
-            let lapsed_at = match ns_until_spent(cfg, h.price, h.balance) {
-                Some(ns) => h.settled_ns.saturating_add(ns).min(now),
-                None => now,
-            };
-            taken = h.balance;
-            h.balance = 0;
-            h.lapsed_ns = Some(lapsed_at);
-        }
-        h.settled_ns = now;
-    }
-    let status = match h.lapsed_ns {
-        None => Status::Active,
-        Some(t) if now < t.saturating_add(cfg.grace_ns) => Status::Grace {
-            until_ns: t.saturating_add(cfg.grace_ns),
-        },
-        Some(_) => Status::Free,
-    };
-    (status, taken)
+    h.settle(&cfg.params(), now)
+}
+
+/// Add `amount` to the prepaid balance, settling to `now` first. Returns
+/// the tax that settle took, for `note_tax_collected` on commit. Refuses a
+/// free holding, and one the top-up would leave below a grace period of tax.
+pub fn top_up(cfg: &Config, h: &mut Harberger, amount: u128, now: u64) -> Result<u128, String> {
+    h.top_up(&cfg.params(), amount, now)
 }
 
 /// Settle a flat record in place. Returns the status and the tax taken,
@@ -217,12 +177,6 @@ pub fn note_tax_collected(taken: u128) {
     if taken > 0 {
         store::meta_set_u128(TAX_COLLECTED_KEY, tax_collected().saturating_add(taken));
     }
-}
-
-/// The smallest deposit accepted when claiming or buying: the tax for one
-/// grace period, so a name is never held on credit.
-pub fn min_deposit(cfg: &Config, price: u128) -> u128 {
-    tax(cfg, price, cfg.grace_ns)
 }
 
 pub fn tax_collected() -> u128 {
@@ -264,80 +218,6 @@ pub fn note_unreconciled(amount: u128, what: &str) {
 mod tests {
     use super::*;
 
-    fn cfg() -> Config {
-        Config {
-            grace_ns: 10 * 1_000_000_000,
-            ..Config::default()
-        }
-    }
-
-    #[test]
-    fn tax_math() {
-        let c = cfg();
-        // 7% of 1T over a year.
-        assert_eq!(tax(&c, 1_000_000_000_000, YEAR_NS as u64), 70_000_000_000);
-        assert_eq!(tax_per_year(&c, 1_000_000_000_000), 70_000_000_000);
-        assert_eq!(tax(&c, 1_000_000_000_000, 0), 0);
-        // The largest allowed price over the longest interval fits; a
-        // silly price saturates instead of overflowing.
-        assert!(tax(&c, MAX_PRICE, u64::MAX) < u128::MAX);
-        assert_eq!(tax(&c, u128::MAX, u64::MAX), u128::MAX);
-    }
-
-    #[test]
-    fn settles_lapses_and_frees() {
-        let c = cfg();
-        let price = 1_000_000_000_000u128;
-        let per_year = tax_per_year(&c, price);
-        let mut h = Harberger {
-            price,
-            balance: per_year,
-            settled_ns: 0,
-            lapsed_ns: None,
-        };
-        // Half a year: half the balance gone, still active.
-        let half = YEAR_NS as u64 / 2;
-        let (s, taken) = settle(&c, &mut h, half);
-        assert_eq!(s, Status::Active);
-        assert_eq!(taken, per_year / 2);
-        assert_eq!(h.balance, per_year - per_year / 2);
-        assert_eq!(h.settled_ns, half);
-        // Five seconds past the year the balance is gone: lapsed at the
-        // one year mark (to the nanosecond, up to integer division), and
-        // in grace since grace is ten seconds.
-        let year = YEAR_NS as u64;
-        let (s, taken) = settle(&c, &mut h, year + 5_000_000_000);
-        assert_eq!(
-            s,
-            Status::Grace {
-                until_ns: h.lapsed_ns.unwrap() + c.grace_ns
-            }
-        );
-        assert_eq!(taken, per_year - per_year / 2);
-        assert_eq!(h.balance, 0);
-        let lapsed = h.lapsed_ns.unwrap();
-        assert!(
-            lapsed >= year - 1_000 && lapsed <= year + 1_000,
-            "lapsed {lapsed} vs {year}"
-        );
-        // Settling again inside grace takes nothing more.
-        let (s, taken) = settle(&c, &mut h, lapsed + 5_000_000_000);
-        assert!(matches!(s, Status::Grace { .. }));
-        assert_eq!(taken, 0);
-        // After the grace period the name is free.
-        let (s, _) = settle(&c, &mut h, lapsed + c.grace_ns + 1);
-        assert_eq!(s, Status::Free);
-    }
-
-    #[test]
-    fn min_deposit_is_one_grace_period() {
-        let c = cfg();
-        assert_eq!(
-            min_deposit(&c, 1_000_000_000_000),
-            tax(&c, 1_000_000_000_000, c.grace_ns)
-        );
-    }
-
     #[test]
     fn config_round_trip() {
         assert_eq!(config(), Config::default());
@@ -358,51 +238,48 @@ mod tests {
     }
 
     #[test]
-    fn schema_2_config_migrates_with_its_values_kept() {
-        let old = ConfigV2 {
-            ledger: Principal::from_text("aaaaa-aa").unwrap(),
-            rate_bps: 500,
-            min_price: 7,
-            grace_ns: 9,
-            fee: 11,
-        };
-        store::meta_set(CONFIG_KEY, candid::encode_one(&old).unwrap());
-        // The old bytes do not decode as the current shape.
-        assert!(candid::decode_one::<Config>(&store::meta_get(CONFIG_KEY).unwrap()).is_err());
-        migrate_config_from_v2();
-        let c = config();
-        assert_eq!(c.ledger, old.ledger);
-        assert_eq!(c.rate_bps, 500);
-        assert_eq!(c.min_price, 7);
-        assert_eq!(c.grace_ns, 9);
-        assert_eq!(c.fee, 11);
-        assert!(!c.flat_names_open);
-        assert_eq!(c.handover_warn_ns, Config::default().handover_warn_ns);
-        // Idempotent, and a current config is left alone.
-        migrate_config_from_v2();
-        assert_eq!(config(), c);
-    }
-
-    #[test]
     fn tax_is_counted_only_when_noted() {
-        let c = cfg();
+        let c = Config {
+            grace_ns: 10 * 1_000_000_000,
+            ..Config::default()
+        };
         let mut r = Record::new(
             "ic-git".into(),
             candid::Principal::anonymous(),
             crate::store::Target::Alias("alice/ic-git".into()),
             0,
         );
-        r.flat = Some(Harberger {
-            price: 1_000_000_000_000,
-            balance: 1_000_000_000_000,
-            settled_ns: 0,
-            lapsed_ns: None,
-        });
+        r.flat = Some(Harberger::new(1_000_000_000_000, 1_000_000_000_000, 0));
         let before = tax_collected();
-        let (_, taken) = settle_record(&c, &mut r.clone(), YEAR_NS as u64);
+        let (_, taken) = settle_record(&c, &mut r.clone(), ic_auction::harberger::YEAR_NS as u64);
         assert_eq!(taken, tax_per_year(&c, 1_000_000_000_000));
         assert_eq!(tax_collected(), before);
         note_tax_collected(taken);
         assert_eq!(tax_collected(), before + taken);
+    }
+
+    #[test]
+    fn schema_2_config_migrates_with_its_values_kept() {
+        let old = ConfigV2 {
+            ledger: candid::Principal::anonymous(),
+            rate_bps: 123,
+            min_price: 7,
+            grace_ns: 9,
+            fee: 5,
+        };
+        store::meta_set(CONFIG_KEY, candid::encode_one(&old).unwrap());
+        assert!(candid::decode_one::<Config>(&store::meta_get(CONFIG_KEY).unwrap()).is_err());
+        migrate_config_from_v2();
+        let c = config();
+        assert_eq!(c.ledger, candid::Principal::anonymous());
+        assert_eq!(c.rate_bps, 123);
+        assert_eq!(c.min_price, 7);
+        assert_eq!(c.grace_ns, 9);
+        assert_eq!(c.fee, 5);
+        assert!(!c.flat_names_open);
+        assert_eq!(c.handover_warn_ns, Config::default().handover_warn_ns);
+        // Idempotent.
+        migrate_config_from_v2();
+        assert_eq!(config(), c);
     }
 }

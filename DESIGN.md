@@ -80,6 +80,12 @@ Squatting prevention without an auction or a committee.
 - Settle lazily: store P, prepaid balance, last settlement time. Tax due is
   P * r * elapsed, computed on any read or write of the record. No timers.
 - When the balance hits zero: grace period, then the name becomes free.
+- A free name (first sale, or lapsed) goes to a sealed-bid second-price
+  (Vickrey) auction, not first come: commit a hash with a deposit, reveal,
+  highest bid wins at the second-highest. The winner's bid becomes their
+  assessed price, so bidding high costs tax from then on. Closing is lazy
+  (anyone may close an ended auction), in keeping with no timers. The
+  market flag gates new bids only.
 - Pay in cycles (ICRC-2 approval against the cycles ledger, service pulls).
   The tax then funds the canister's own operation. ICP later if wanted.
 - Zero-price names are fine: no tax, takeable for nothing. Set a small
@@ -175,7 +181,7 @@ M3: delegation records; stage 2 gateway via HTTPS outcalls.
 - Handle allocation for scoped names: principal-registered, ic-git tenant,
   or both? Who arbitrates a handle collision?
 - Alias depth limit and loop detection.
-- Grace period length and whether a lapsed name is auctioned or just freed.
+- Grace period length. (A lapsed name is auctioned, like a first sale.)
 - Which DNS provider for stage 2 (needs an API reachable by HTTPS outcalls
   with a stable response for consensus).
 - Whether `resolve` for other canisters should be a plain query (cheap,

@@ -4,19 +4,21 @@
 //! alias targets, text records, certified `resolve`, `announce` gated by
 //! caller principal, the stage 1 HTTP gateway (path-based 302), the
 //! directory (tags and search), and flat names under a Harberger tax paid
-//! in cycles through the cycles ledger.
+//! in cycles through the cycles ledger, with free flat names allocated by
+//! sealed-bid auction.
 
+mod auction;
 mod certify;
 mod directory;
 mod gateway;
 mod harberger;
-mod ledger;
 mod names;
 mod store;
 
 use candid::{CandidType, Principal};
 use directory::{SearchQuery, SearchResult, TagCount};
 use harberger::{Config as HarbergerConfig, Status};
+use ic_auction::ledger;
 use store::{Handle, Harberger, Record, Target};
 
 // --- lifecycle --------------------------------------------------------------
@@ -90,7 +92,7 @@ fn authorize_flat(cfg: &HarbergerConfig, name: &str, now: u64) -> Result<(Record
     }
     let (status, tax) = harberger::settle_record(cfg, &mut r, now);
     if status == Status::Free {
-        return Err(format!("'{name}' has lapsed and is free to claim"));
+        return Err(format!("'{name}' has lapsed and is up for auction"));
     }
     Ok((r, tax))
 }
@@ -483,7 +485,7 @@ fn follow(name: &str) -> Result<(Principal, Vec<Record>), String> {
             let cfg = cfg.get_or_insert_with(harberger::config);
             let (status, _) = harberger::settle(cfg, &mut h.clone(), now);
             if status == Status::Free {
-                return Err(format!("'{current}' has lapsed and is free to claim"));
+                return Err(format!("'{current}' has lapsed and is up for auction"));
             }
         }
         let next = record.target.clone();
@@ -567,16 +569,17 @@ fn snapshot(cfg: &HarbergerConfig, name: &str, now: u64) -> Option<(Record, u128
     Some((r, taken, snap))
 }
 
-/// Claiming is refused while the market is closed. Buying a held name is
-/// never gated: the forced sale is what keeps a holder's price honest
-/// (DESIGN.md section 5), so closing the market stops new names, not the
-/// pressure on existing ones. Everything a holder needs to keep or leave
-/// a name stays open too.
+/// Bidding for a free name is refused while the market is closed. Buying
+/// a held name is never gated: the forced sale is what keeps a holder's
+/// price honest (DESIGN.md section 5), so closing the market stops new
+/// names, not the pressure on existing ones. Everything a holder needs to
+/// keep or leave a name stays open too, as does revealing and closing an
+/// auction already running.
 fn market_open(cfg: &HarbergerConfig) -> Result<(), String> {
     if cfg.flat_names_open {
         Ok(())
     } else {
-        Err("flat names are not open for claiming yet".to_string())
+        Err("flat names are not open for bidding yet".to_string())
     }
 }
 
@@ -642,7 +645,7 @@ struct FlatStatus {
     balance: u128,
     status: Status,
     tax_per_year: u128,
-    /// The least a claim or buy at `price` must deposit.
+    /// The least a buy at `price` must deposit.
     min_deposit: u128,
     changed_hands_ns: u64,
 }
@@ -691,65 +694,6 @@ fn check_deposit(cfg: &HarbergerConfig, price: u128, deposit: u128) -> Result<()
     Ok(())
 }
 
-/// Take a free flat name: unclaimed, or lapsed past its grace period.
-/// Pulls `deposit` from the caller. The name aliases `alias_to`.
-#[ic_cdk::update]
-async fn claim(name: String, alias_to: String, price: u128, deposit: u128) -> Result<(), String> {
-    let cfg = harberger::config();
-    market_open(&cfg)?;
-    let caller = caller()?;
-    names::check_flat(&name)?;
-    let target = Target::Alias(alias_to);
-    check_flat_target(&target)?;
-    check_price(&cfg, price)?;
-    check_deposit(&cfg, price, deposit)?;
-    // Claimable: no record, or one whose grace period is over.
-    let claimable = |now: u64| -> Result<Option<(Record, u128, Snapshot)>, String> {
-        match snapshot(&cfg, &name, now) {
-            None => Ok(None),
-            Some(t) if t.2.status == Status::Free => Ok(Some(t)),
-            Some((r, _, _)) => Err(format!("'{name}' is owned by {}", r.owner.to_text())),
-        }
-    };
-    let before = claimable(ic_cdk::api::time())?.map(|t| t.2);
-
-    pull(&cfg, caller, deposit).await?;
-
-    let now = ic_cdk::api::time();
-    let old = match claimable(now) {
-        Ok(old) if old.as_ref().map(|t| &t.2) == before.as_ref() => old,
-        _ => {
-            store::add_credit(&caller, deposit);
-            return Err(format!(
-                "'{name}' changed hands while paying; deposit credited back"
-            ));
-        }
-    };
-    let (mut r, tax) = match old {
-        Some((old, tax, _)) => (
-            Record {
-                owner: caller,
-                previous_target: Some(old.target.clone()),
-                target,
-                text: Vec::new(),
-                updated_ns: now,
-                changed_hands_ns: now,
-                ..old
-            },
-            tax,
-        ),
-        None => (Record::new(name, caller, target, now), 0),
-    };
-    r.flat = Some(Harberger {
-        price,
-        balance: deposit,
-        settled_ns: now,
-        lapsed_ns: None,
-    });
-    commit_flat(r, tax);
-    Ok(())
-}
-
 /// Buy a held flat name at its assessed price, if that price is at most
 /// `max_price` (what the buyer saw; the seller may have moved it since).
 /// Pulls price plus `deposit` from the caller; the seller is credited the
@@ -775,7 +719,7 @@ async fn buy(
         let (r, tax, snap) =
             snapshot(&cfg, &name, now).ok_or_else(|| format!("no record for '{name}'"))?;
         if snap.status == Status::Free {
-            return Err(format!("'{name}' has lapsed; claim it instead"));
+            return Err(format!("'{name}' has lapsed; bid for it instead"));
         }
         if snap.owner == caller {
             return Err("you hold this name; use set_price".to_string());
@@ -810,12 +754,7 @@ async fn buy(
     r.text.clear();
     r.updated_ns = now;
     r.changed_hands_ns = now;
-    r.flat = Some(Harberger {
-        price,
-        balance: deposit,
-        settled_ns: now,
-        lapsed_ns: None,
-    });
+    r.flat = Some(Harberger::new(price, deposit, now));
     commit_flat(r, tax);
     Ok(())
 }
@@ -837,7 +776,7 @@ async fn deposit(name: String, amount: u128) -> Result<(), String> {
         let (r, tax, snap) =
             snapshot(&cfg, &name, now).ok_or_else(|| format!("no record for '{name}'"))?;
         if snap.status == Status::Free {
-            return Err(format!("'{name}' has lapsed; claim it instead"));
+            return Err(format!("'{name}' has lapsed; bid for it instead"));
         }
         let balance = r.flat.as_ref().map(|h| h.balance).unwrap_or(0);
         let min = harberger::min_deposit(&cfg, snap.price);
@@ -862,13 +801,21 @@ async fn deposit(name: String, amount: u128) -> Result<(), String> {
             ));
         }
     };
-    if let Some(h) = r.flat.as_mut() {
-        h.balance = h.balance.saturating_add(amount);
-        h.lapsed_ns = None;
-        h.settled_ns = now;
-    }
+    // Already settled to now by payable, so this takes no further tax
+    // unless the crate carries a sub-cycle remainder; count it all the same.
+    let topped = match r.flat.as_mut() {
+        Some(h) => harberger::top_up(&cfg, h, amount, now),
+        None => Err(format!("'{name}' is not a flat name")),
+    };
+    let more = match topped {
+        Ok(more) => more,
+        Err(e) => {
+            store::add_credit(&caller, amount);
+            return Err(format!("{e}; amount credited back"));
+        }
+    };
     r.updated_ns = now;
-    commit_flat(r, tax);
+    commit_flat(r, tax.saturating_add(more));
     Ok(())
 }
 
@@ -885,6 +832,110 @@ fn set_price(name: String, price: u128) -> Result<(), String> {
     r.updated_ns = now;
     commit_flat(r, tax);
     Ok(())
+}
+
+// --- auctions for free flat names (DESIGN.md section 5) ---------------------
+//
+// A flat name nobody holds is sold by sealed-bid second-price auction
+// (auction.rs): commit, reveal, close. Only committing is behind the
+// market flag.
+
+/// Commit a sealed bid for a free flat name, escrowing `deposit` by an
+/// ICRC-2 pull. The first commitment opens the auction. `commitment` is
+/// the 32 bytes `auction_commitment` describes. A second commitment from
+/// the same caller replaces the first, whose deposit is credited back.
+#[ic_cdk::update]
+async fn bid(name: String, commitment: Vec<u8>, deposit: u128) -> Result<(), String> {
+    let cfg = harberger::config();
+    market_open(&cfg)?;
+    let caller = caller()?;
+    names::check_flat(&name)?;
+    let commitment: [u8; 32] = commitment
+        .try_into()
+        .map_err(|_| "commitment must be 32 bytes".to_string())?;
+    auction::check_bid(&cfg, &name, deposit, ic_cdk::api::time())?;
+
+    pull(&cfg, caller, deposit).await?;
+
+    // Checked again at the new time: the commit phase may have ended, or
+    // an ended auction may have been closed with a winner, while paying.
+    match auction::place_bid(
+        &cfg,
+        &name,
+        caller,
+        commitment,
+        deposit,
+        ic_cdk::api::time(),
+    ) {
+        Ok(replaced) => {
+            store::add_credit(&caller, replaced.unwrap_or(0));
+            Ok(())
+        }
+        Err(e) => {
+            store::add_credit(&caller, deposit);
+            Err(format!("{e}; deposit credited back"))
+        }
+    }
+}
+
+/// Open the caller's commitment during the reveal phase. `alias_to` is
+/// the scoped name the flat name will alias if this bid wins, and the bid
+/// becomes its assessed price, so the deposit must cover the bid plus one
+/// grace period of tax at it. An unrevealed commitment forfeits its
+/// deposit.
+#[ic_cdk::update]
+fn reveal(name: String, amount: u128, salt: Vec<u8>, alias_to: String) -> Result<(), String> {
+    let caller = caller()?;
+    check_flat_target(&Target::Alias(alias_to.clone()))?;
+    auction::reveal(
+        &harberger::config(),
+        &name,
+        caller,
+        amount,
+        &salt,
+        alias_to,
+        ic_cdk::api::time(),
+    )
+}
+
+/// Close an auction whose reveal phase is over. Anyone may call it. The
+/// winner holds the name at their bid with one grace period of tax as
+/// its balance; every other refund is credited.
+#[ic_cdk::update]
+fn close_auction(name: String) -> Result<auction::Closed, String> {
+    auction::close(&harberger::config(), &name, ic_cdk::api::time())
+}
+
+#[ic_cdk::query]
+fn auction_status(name: String) -> Option<auction::View> {
+    auction::status(&name, ic_cdk::api::time())
+}
+
+/// Every auction not yet closed, ended ones included.
+#[ic_cdk::query]
+fn auctions() -> Vec<auction::View> {
+    auction::list(ic_cdk::api::time())
+}
+
+/// sha256("ic-auction/vickrey/v1" || u64be(len bidder) || bidder ||
+/// u128be(amount) || u64be(len salt) || salt), bidder the principal's
+/// bytes. For tests and tooling only: asking a replica sends it your bid,
+/// so compute it locally when the bid is real.
+#[ic_cdk::query]
+fn auction_commitment(bidder: Principal, amount: u128, salt: Vec<u8>) -> Vec<u8> {
+    auction::commitment(bidder, amount, &salt).to_vec()
+}
+
+/// Phases and reserve for auctions opened from here on. Controllers only.
+#[ic_cdk::update]
+fn set_auction_config(c: auction::Config) -> Result<(), String> {
+    admin()?;
+    auction::set_config(c)
+}
+
+#[ic_cdk::query]
+fn auction_config() -> auction::Config {
+    auction::config()
 }
 
 #[ic_cdk::query]
@@ -956,10 +1007,16 @@ async fn withdraw(amount: u128) -> Result<u128, String> {
 
 #[derive(CandidType)]
 struct Treasury {
-    /// Tax settled so far, cycles. Sits in this canister's ledger account
-    /// alongside prepaid balances and credits, which it must never touch.
+    /// Tax settled so far plus auction proceeds, cycles. Sits in this
+    /// canister's ledger account alongside prepaid balances, credits and
+    /// auction escrow, which it must never touch.
     collected: u128,
     withdrawn: u128,
+    /// The part of `collected` that came from auctions: prices paid and
+    /// deposits forfeited by unrevealed commitments.
+    auctioned: u128,
+    /// Deposits held in auctions not yet closed.
+    escrowed: u128,
     /// Cycles whose movement could not be confirmed from a ledger reply;
     /// the operator reconciles them against the ledger's blocks.
     unreconciled: u128,
@@ -972,6 +1029,8 @@ fn treasury() -> Treasury {
     Treasury {
         collected: harberger::tax_collected(),
         withdrawn: harberger::tax_withdrawn(),
+        auctioned: auction::proceeds(),
+        escrowed: auction::escrowed(),
         unreconciled,
         unreconciled_last,
     }
@@ -1008,6 +1067,10 @@ async fn fund_self(amount: u128) -> Result<u128, String> {
         Err(f) => {
             if f.nothing_moved() {
                 harberger::undo_tax_withdrawn(amount);
+            } else if let ledger::Failure::FeeCharged(_) = f {
+                // The cycles came back to the account; only the fee was
+                // spent, and it came out of tax like a successful call's.
+                harberger::undo_tax_withdrawn(amount - cfg.fee);
             } else {
                 harberger::note_unreconciled(
                     amount,
@@ -1028,14 +1091,15 @@ fn funds_held() -> Result<(), String> {
         }
     });
     let credits = store::credits_outstanding();
+    let escrow = auction::escrowed();
     let tax = harberger::tax_collected().saturating_sub(harberger::tax_withdrawn());
     let (unreconciled, _) = harberger::unreconciled();
     let in_flight = InFlight::count();
-    if flat == 0 && credits == 0 && tax == 0 && unreconciled == 0 && in_flight == 0 {
+    if flat == 0 && credits == 0 && escrow == 0 && tax == 0 && unreconciled == 0 && in_flight == 0 {
         return Ok(());
     }
     Err(format!(
-        "funds are held at the current ledger: {flat} flat name(s), {credits} cycles of credit, {tax} of tax, {unreconciled} unreconciled, {in_flight} call(s) in flight"
+        "funds are held at the current ledger: {flat} flat name(s), {credits} cycles of credit, {escrow} in auction escrow, {tax} of tax, {unreconciled} unreconciled, {in_flight} call(s) in flight"
     ))
 }
 
