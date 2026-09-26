@@ -1,6 +1,8 @@
 # Local assistant context. Never commit or push.
 CLAUDE.md
 claude.md
+MEMORY.md
+memory.md
 .claude/
 
 # Build artifacts (matches ic-git); tools/verify has its own target dir
