@@ -176,7 +176,10 @@ pub const MEM_AUCTIONS: MemoryId = MemoryId::new(6);
 /// 2: M1 adds the tag index, filled from existing records on first upgrade.
 /// 3: the Harberger config gains flat_names_open and handover_warn_ns;
 /// a stored schema 2 config is rewritten in the new shape.
-pub const SCHEMA: u32 = 3;
+/// 4: a "deployer" text record marks a name as announced, and only announce
+/// may write it. Earlier set_text accepted any key, so stored deployer and
+/// announced_ns records are dropped (see migrate_announce_marker_from_v3).
+pub const SCHEMA: u32 = 4;
 const SCHEMA_KEY: &str = "schema";
 
 /// A virtual memory for a map that lives in another module.
@@ -400,6 +403,30 @@ pub fn for_each_canonical(mut f: impl FnMut(&str, Vec<u8>)) {
     });
 }
 
+/// Schema 4 migration. Before schema 4 an owner could write "deployer" and
+/// "announced_ns" with set_text, so a stored one does not prove a deployer
+/// announced the name. Drop both from every record; a real deployer puts
+/// them back on its next announce. updated_ns is left alone: the owner did
+/// not write. Returns how many records changed.
+pub fn migrate_announce_marker_from_v3() -> usize {
+    let mut changed = Vec::new();
+    for_each_record(|r| {
+        if r.text
+            .iter()
+            .any(|(k, _)| crate::names::ANNOUNCE_KEYS.contains(&k.as_str()))
+        {
+            changed.push(r.clone());
+        }
+    });
+    let n = changed.len();
+    for mut r in changed {
+        r.text
+            .retain(|(k, _)| !crate::names::ANNOUNCE_KEYS.contains(&k.as_str()));
+        put_record(r);
+    }
+    n
+}
+
 /// Every record, in name order. Search and index rebuild walk this.
 pub fn for_each_record(mut f: impl FnMut(&Record)) {
     RECORDS.with(|r| {
@@ -502,6 +529,44 @@ mod tests {
         let r = sample();
         let bytes = r.to_bytes().into_owned();
         assert_eq!(Record::from_bytes(Cow::Owned(bytes)), r);
+    }
+
+    #[test]
+    fn announce_marker_migration() {
+        // A schema 3 record whose owner wrote deployer text by hand, one
+        // with owner provenance only, and one with no text records.
+        let mut forged = sample();
+        forged.name = "alice/forged".into();
+        forged.text = vec![
+            ("announced_ns".into(), "5".into()),
+            ("deployer".into(), "umobs-yiaaa-aaaab-agyrq-cai".into()),
+            ("description".into(), "d".into()),
+            ("module_hash".into(), "ab".repeat(32)),
+        ];
+        let mut owned = sample();
+        owned.name = "alice/owned".into();
+        owned.text = vec![("repo".into(), "mine".into())];
+        let mut bare = sample();
+        bare.name = "alice/bare".into();
+        bare.text = Vec::new();
+        for r in [&forged, &owned, &bare] {
+            put_record(r.clone());
+        }
+
+        assert_eq!(migrate_announce_marker_from_v3(), 1);
+        let after = get_record("alice/forged").unwrap();
+        assert_eq!(
+            after.text,
+            vec![
+                ("description".to_string(), "d".to_string()),
+                ("module_hash".to_string(), "ab".repeat(32)),
+            ]
+        );
+        assert_eq!(after.updated_ns, forged.updated_ns);
+        assert_eq!(get_record("alice/owned").unwrap(), owned);
+        assert_eq!(get_record("alice/bare").unwrap(), bare);
+        // Running it again finds nothing.
+        assert_eq!(migrate_announce_marker_from_v3(), 0);
     }
 
     #[test]

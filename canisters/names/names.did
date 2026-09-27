@@ -103,6 +103,9 @@ type Hit = record {
   repo : opt text;
   commit : opt text;
   module_hash : opt text;
+  // Set when a deployer announced the name; absent when the owner wrote
+  // repo, commit and module_hash.
+  deployer : opt text;
   updated_ns : nat64;
 };
 
@@ -204,7 +207,8 @@ service : {
   get_handle : (text) -> (opt Handle) query;
   set_handle_deployer : (text, opt principal) -> (Result);
 
-  // records, owner only
+  // records, owner only. set_text refuses deployer and announced_ns, and
+  // once a deployer has announced a name also repo, commit and module_hash.
   set_record : (text, Target) -> (Result);
   set_text : (text, text, opt text) -> (Result);
   delete_record : (text) -> (Result);

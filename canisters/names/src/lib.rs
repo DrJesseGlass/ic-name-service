@@ -29,11 +29,12 @@ fn init() {
     certify::rebuild();
 }
 
-/// The certified tree is heap state and is rebuilt on every upgrade. The
-/// tag index is stable memory kept in step on every write, so it is only
-/// rebuilt when the schema version says the stored data predates it (an
-/// M0 canister had tags text records and no index). A newer schema than
-/// this code knows is refused rather than misread.
+/// The certified tree is heap state and is rebuilt on every upgrade, after
+/// any migration that rewrites records. The tag index is stable memory
+/// kept in step on every write, so it is only rebuilt when the schema
+/// version says the stored data predates it (an M0 canister had tags text
+/// records and no index). A newer schema than this code knows is refused
+/// rather than misread.
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     let from = store::schema_version();
@@ -42,6 +43,9 @@ fn post_upgrade() {
             "stable memory schema {from} is newer than this code's {}",
             store::SCHEMA
         ));
+    }
+    if from < 4 {
+        store::migrate_announce_marker_from_v3();
     }
     certify::rebuild();
     if from < 2 {
@@ -289,24 +293,16 @@ fn announce(a: Announcement) -> Result<(), String> {
         .unwrap_or_else(|| Record::new(a.name.clone(), owner, Target::Address(a.canister), now));
     record.target = Target::Address(a.canister);
     record.updated_ns = now;
-    let provenance = [
-        ("repo", a.repo),
-        ("commit", a.commit),
-        ("module_hash", a.module_hash),
-        ("deployer", deployer.to_text()),
-        ("announced_ns", now.to_string()),
-    ];
-    for (k, v) in provenance {
-        record.text.retain(|(key, _)| key != k);
-        record.text.push((k.to_string(), v));
-    }
-    record.text.sort_by(|x, y| x.0.cmp(&y.0));
-    if record.text.len() > names::MAX_TEXT_RECORDS {
-        return Err(format!(
-            "at most {} text records per name",
-            names::MAX_TEXT_RECORDS
-        ));
-    }
+    names::set_provenance(
+        &mut record.text,
+        vec![
+            ("repo", a.repo),
+            ("commit", a.commit),
+            ("module_hash", a.module_hash),
+            ("deployer", deployer.to_text()),
+            ("announced_ns", now.to_string()),
+        ],
+    );
     commit(record);
     Ok(())
 }
@@ -314,13 +310,18 @@ fn announce(a: Announcement) -> Result<(), String> {
 // --- records ----------------------------------------------------------------
 
 /// Create or repoint a scoped name, or repoint a flat name the caller
-/// holds. Text records survive a repoint.
+/// holds. Owner text records survive a repoint; the provenance records
+/// (names::PROVENANCE_KEYS) describe the announced canister, so a repoint
+/// to a different target drops them.
 #[ic_cdk::update]
 fn set_record(name: String, target: Target) -> Result<(), String> {
     let now = ic_cdk::api::time();
     if !names::is_scoped(&name) {
         let (mut r, tax) = authorize_flat(&harberger::config(), &name, now)?;
         check_flat_target(&target)?;
+        if r.target != target {
+            names::clear_provenance(&mut r.text);
+        }
         r.target = target;
         r.updated_ns = now;
         commit_flat(r, tax);
@@ -335,6 +336,9 @@ fn set_record(name: String, target: Target) -> Result<(), String> {
     }
     let record = match store::get_record(&name) {
         Some(mut r) => {
+            if r.target != target {
+                names::clear_provenance(&mut r.text);
+            }
             r.target = target;
             r.updated_ns = now;
             r
@@ -345,7 +349,8 @@ fn set_record(name: String, target: Target) -> Result<(), String> {
     Ok(())
 }
 
-/// Set (Some) or clear (None) one text record on an existing name.
+/// Set (Some) or clear (None) one text record on an existing name. The
+/// provenance keys (names::PROVENANCE_KEYS) are left to announce.
 #[ic_cdk::update]
 fn set_text(name: String, key: String, value: Option<String>) -> Result<(), String> {
     let now = ic_cdk::api::time();
@@ -357,21 +362,13 @@ fn set_text(name: String, key: String, value: Option<String>) -> Result<(), Stri
         authorize_flat(&harberger::config(), &name, now)?
     };
     names::check_text_key(&key)?;
-    record.text.retain(|(k, _)| *k != key);
-    if let Some(v) = value {
-        names::check_text_value(&v)?;
+    if let Some(v) = &value {
+        names::check_text_value(v)?;
         if key == "tags" {
-            names::check_tags(&v)?;
+            names::check_tags(v)?;
         }
-        if record.text.len() >= names::MAX_TEXT_RECORDS {
-            return Err(format!(
-                "at most {} text records per name",
-                names::MAX_TEXT_RECORDS
-            ));
-        }
-        record.text.push((key, v));
-        record.text.sort_by(|a, b| a.0.cmp(&b.0));
     }
+    names::set_owner_text(&mut record.text, &key, value)?;
     record.updated_ns = now;
     commit_flat(record, tax);
     Ok(())

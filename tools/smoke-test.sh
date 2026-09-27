@@ -420,7 +420,7 @@ dfx deploy --yes --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
 out=$(call resolve "(\"$handle/app\")")
 echo "$out" | grep >/dev/null "canister = principal \"$target\"" || { echo "record lost across upgrade"; exit 1; }
 echo "$out" | grep >/dev/null 'certificate = opt blob' || { echo "no certificate after upgrade"; exit 1; }
-call schema_version | grep >/dev/null '(3 : nat32)' || { echo "schema not at 3 after upgrade"; exit 1; }
+call schema_version | grep >/dev/null '(4 : nat32)' || { echo "schema not at 4 after upgrade"; exit 1; }
 call search "(record { tag = opt \"deploy\" })" | grep >/dev/null "$handle/app" || { echo "tag index lost across upgrade"; exit 1; }
 call auction_status "(\"$held\")" | grep >/dev/null "principal \"$other\"" || { echo "auction lost across upgrade"; exit 1; }
 echo "--- the unrevealed commitment forfeits at close"

@@ -328,6 +328,7 @@ struct JsonHit {
     repo: Option<String>,
     commit: Option<String>,
     module_hash: Option<String>,
+    deployer: Option<String>,
     updated_ns: String,
 }
 
@@ -363,6 +364,7 @@ fn api_search(params: &[(String, String)]) -> HttpResponse {
                 repo: h.repo,
                 commit: h.commit,
                 module_hash: h.module_hash,
+                deployer: h.deployer,
                 updated_ns: h.updated_ns.to_string(),
             })
             .collect(),

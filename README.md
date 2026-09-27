@@ -74,7 +74,17 @@ owns or one whose owner named it with `set_handle_deployer`. An
 unregistered handle is registered to the deployer on first announce, so a
 git push lists an app with nobody registering first. The record's target
 becomes the canister and its text records carry repo, commit, module_hash,
-deployer and announced_ns.
+deployer and announced_ns. Those five keys do not count toward the 32
+owner text records a name may hold. `set_text` never writes deployer or
+announced_ns, and once a name has been announced it refuses repo, commit
+and module_hash too, so announced provenance cannot be forged. A name
+never announced (every flat name, and scoped names deployed some other
+way) lets the owner set those three, for example to pin module_hash for
+the verifier. An owner repoint (`set_record`) to a different target drops
+all five, since they describe the old canister. Upgrading to schema 4
+drops any stored deployer and announced_ns records, because earlier
+versions let owners write them; announced names get them back on their
+next announce.
 
 The ic-git side is one optional module (canisters/git/src/names.rs there)
 behind `names_set_config(canister, handle)`: every repo of that instance is
@@ -162,8 +172,8 @@ tag in the handle grammar, at most 16. A stable-memory index keyed by tag,
 kept in step on every write, answers `search` by tag with a range scan; a
 substring query over names and descriptions is a pass over all records, which is right at any size
 this canister will see before delegation. Hits carry the description, the
-tags and the provenance text records (repo, commit, module_hash) that
-announce fills in. `/api/search?q=&tag=&offset=&limit=` and `/api/tags`
+tags and the provenance text records (repo, commit, module_hash), plus
+the deployer when a deployer announced them rather than the owner. `/api/search?q=&tag=&offset=&limit=` and `/api/tags`
 serve the same over HTTP.
 
 The verifier's check E closes the loop: when the final record pins a
