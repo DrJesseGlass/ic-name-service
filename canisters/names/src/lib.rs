@@ -306,13 +306,18 @@ fn announce(a: Announcement) -> Result<(), String> {
 // --- records ----------------------------------------------------------------
 
 /// Create or repoint a scoped name, or repoint a flat name the caller
-/// holds. Text records survive a repoint.
+/// holds. Owner text records survive a repoint; the provenance records
+/// (names::PROVENANCE_KEYS) describe the announced canister, so a repoint
+/// to a different target drops them.
 #[ic_cdk::update]
 fn set_record(name: String, target: Target) -> Result<(), String> {
     let now = ic_cdk::api::time();
     if !names::is_scoped(&name) {
         let (mut r, tax) = authorize_flat(&harberger::config(), &name, now)?;
         check_flat_target(&target)?;
+        if r.target != target {
+            names::clear_provenance(&mut r.text);
+        }
         r.target = target;
         r.updated_ns = now;
         commit_flat(r, tax);
@@ -327,6 +332,9 @@ fn set_record(name: String, target: Target) -> Result<(), String> {
     }
     let record = match store::get_record(&name) {
         Some(mut r) => {
+            if r.target != target {
+                names::clear_provenance(&mut r.text);
+            }
             r.target = target;
             r.updated_ns = now;
             r

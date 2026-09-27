@@ -114,6 +114,9 @@ pub struct Hit {
     pub repo: Option<String>,
     pub commit: Option<String>,
     pub module_hash: Option<String>,
+    /// The deployer that announced the name. None when the owner wrote
+    /// the provenance, or there is none.
+    pub deployer: Option<String>,
     pub updated_ns: u64,
 }
 
@@ -134,6 +137,7 @@ fn hit(r: &Record) -> Hit {
         repo: r.text("repo").map(str::to_string),
         commit: r.text("commit").map(str::to_string),
         module_hash: r.text("module_hash").map(str::to_string),
+        deployer: r.text("deployer").map(str::to_string),
         updated_ns: r.updated_ns,
     }
 }

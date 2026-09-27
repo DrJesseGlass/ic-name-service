@@ -89,12 +89,17 @@ pub fn check_text_value(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Text record keys only `announce` writes: the listed deployer's
-/// provenance. Owners may not set or clear them, so the directory can show
-/// them as what a deployer reported, and they do not count toward
-/// MAX_TEXT_RECORDS, so a name full of owner records can still be
-/// announced.
+/// Provenance text records: what the code behind a name is. `announce`
+/// writes all five; they do not count toward MAX_TEXT_RECORDS, so a name
+/// full of owner records can still be announced.
 pub const PROVENANCE_KEYS: &[&str] = &["repo", "commit", "module_hash", "deployer", "announced_ns"];
+
+/// The provenance keys only `announce` writes. A "deployer" record marks
+/// the name as announced: from then on the owner may not touch any
+/// provenance key, so what the directory shows is what the deployer
+/// reported. Before that (flat names, names deployed without a deployer)
+/// the owner may write repo, commit and module_hash themselves.
+pub const ANNOUNCE_KEYS: &[&str] = &["deployer", "announced_ns"];
 
 /// Set (Some) or clear (None) one owner text record, keeping the list
 /// sorted by key. The key and value must already be checked.
@@ -103,8 +108,13 @@ pub fn set_owner_text(
     key: &str,
     value: Option<String>,
 ) -> Result<(), String> {
-    if PROVENANCE_KEYS.contains(&key) {
+    if ANNOUNCE_KEYS.contains(&key) {
         return Err(format!("text key '{key}' is written only by announce"));
+    }
+    if PROVENANCE_KEYS.contains(&key) && text.iter().any(|(k, _)| k == "deployer") {
+        return Err(format!(
+            "text key '{key}' was announced by a deployer; only announce may change it"
+        ));
     }
     text.retain(|(k, _)| k != key);
     if let Some(v) = value {
@@ -112,7 +122,7 @@ pub fn set_owner_text(
             .iter()
             .filter(|(k, _)| !PROVENANCE_KEYS.contains(&k.as_str()))
             .count();
-        if owned >= MAX_TEXT_RECORDS {
+        if owned >= MAX_TEXT_RECORDS && !PROVENANCE_KEYS.contains(&key) {
             return Err(format!("at most {MAX_TEXT_RECORDS} text records per name"));
         }
         text.push((key.to_string(), v));
@@ -125,11 +135,21 @@ pub fn set_owner_text(
 /// list sorted by key. Never refused: provenance sits outside the cap.
 pub fn set_provenance(text: &mut Vec<(String, String)>, provenance: Vec<(&str, String)>) {
     for (k, v) in provenance {
-        debug_assert!(PROVENANCE_KEYS.contains(&k));
+        assert!(
+            PROVENANCE_KEYS.contains(&k),
+            "'{k}' is not a provenance key"
+        );
         text.retain(|(key, _)| key != k);
         text.push((k.to_string(), v));
     }
     text.sort_by(|a, b| a.0.cmp(&b.0));
+}
+
+/// Drop the provenance records. An owner repoint calls this: the deployer
+/// reported on the canister it announced, not on the new target, and a
+/// stale module_hash would pin the new target to the old code.
+pub fn clear_provenance(text: &mut Vec<(String, String)>) {
+    text.retain(|(k, _)| !PROVENANCE_KEYS.contains(&k.as_str()));
 }
 
 pub const MAX_TAGS: usize = 16;
@@ -349,5 +369,38 @@ mod tests {
             assert!(set_owner_text(&mut text, key, None).is_err());
         }
         assert_eq!(text.len(), PROVENANCE_KEYS.len());
+    }
+
+    #[test]
+    fn owner_provenance_until_announced() {
+        // Never announced: the owner may pin a hash and name a repo, and
+        // clear them again, but may not claim a deployer.
+        let mut text = Vec::new();
+        let hash = Some("ab".repeat(32));
+        assert!(set_owner_text(&mut text, "module_hash", hash.clone()).is_ok());
+        assert!(set_owner_text(&mut text, "repo", Some("mine".to_string())).is_ok());
+        assert!(set_owner_text(&mut text, "repo", None).is_ok());
+        for key in ANNOUNCE_KEYS {
+            assert!(set_owner_text(&mut text, key, Some("x".to_string())).is_err());
+        }
+        // Owner-written provenance sits outside the cap too.
+        for i in 0..MAX_TEXT_RECORDS {
+            set_owner_text(&mut text, &format!("k{i:02}"), Some("v".to_string())).unwrap();
+        }
+        assert_eq!(text.len(), MAX_TEXT_RECORDS + 1);
+
+        // An announce overwrites it and locks it; a repoint unlocks it.
+        set_provenance(&mut text, provenance(&"11".repeat(20)));
+        assert!(set_owner_text(&mut text, "module_hash", hash.clone()).is_err());
+        clear_provenance(&mut text);
+        assert!(set_owner_text(&mut text, "module_hash", hash).is_ok());
+    }
+
+    #[test]
+    fn clear_provenance_keeps_owner_records() {
+        let mut text = owner_records(3);
+        set_provenance(&mut text, provenance(&"11".repeat(20)));
+        clear_provenance(&mut text);
+        assert_eq!(text, owner_records(3));
     }
 }
