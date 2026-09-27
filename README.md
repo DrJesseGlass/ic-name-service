@@ -74,7 +74,9 @@ owns or one whose owner named it with `set_handle_deployer`. An
 unregistered handle is registered to the deployer on first announce, so a
 git push lists an app with nobody registering first. The record's target
 becomes the canister and its text records carry repo, commit, module_hash,
-deployer and announced_ns.
+deployer and announced_ns. Those five keys are written only by announce:
+`set_text` refuses them, and they do not count toward the 32 owner text
+records a name may hold.
 
 The ic-git side is one optional module (canisters/git/src/names.rs there)
 behind `names_set_config(canister, handle)`: every repo of that instance is

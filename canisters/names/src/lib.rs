@@ -289,24 +289,16 @@ fn announce(a: Announcement) -> Result<(), String> {
         .unwrap_or_else(|| Record::new(a.name.clone(), owner, Target::Address(a.canister), now));
     record.target = Target::Address(a.canister);
     record.updated_ns = now;
-    let provenance = [
-        ("repo", a.repo),
-        ("commit", a.commit),
-        ("module_hash", a.module_hash),
-        ("deployer", deployer.to_text()),
-        ("announced_ns", now.to_string()),
-    ];
-    for (k, v) in provenance {
-        record.text.retain(|(key, _)| key != k);
-        record.text.push((k.to_string(), v));
-    }
-    record.text.sort_by(|x, y| x.0.cmp(&y.0));
-    if record.text.len() > names::MAX_TEXT_RECORDS {
-        return Err(format!(
-            "at most {} text records per name",
-            names::MAX_TEXT_RECORDS
-        ));
-    }
+    names::set_provenance(
+        &mut record.text,
+        vec![
+            ("repo", a.repo),
+            ("commit", a.commit),
+            ("module_hash", a.module_hash),
+            ("deployer", deployer.to_text()),
+            ("announced_ns", now.to_string()),
+        ],
+    );
     commit(record);
     Ok(())
 }
@@ -345,7 +337,8 @@ fn set_record(name: String, target: Target) -> Result<(), String> {
     Ok(())
 }
 
-/// Set (Some) or clear (None) one text record on an existing name.
+/// Set (Some) or clear (None) one text record on an existing name. The
+/// provenance keys (names::PROVENANCE_KEYS) are left to announce.
 #[ic_cdk::update]
 fn set_text(name: String, key: String, value: Option<String>) -> Result<(), String> {
     let now = ic_cdk::api::time();
@@ -357,21 +350,13 @@ fn set_text(name: String, key: String, value: Option<String>) -> Result<(), Stri
         authorize_flat(&harberger::config(), &name, now)?
     };
     names::check_text_key(&key)?;
-    record.text.retain(|(k, _)| *k != key);
-    if let Some(v) = value {
-        names::check_text_value(&v)?;
+    if let Some(v) = &value {
+        names::check_text_value(v)?;
         if key == "tags" {
-            names::check_tags(&v)?;
+            names::check_tags(v)?;
         }
-        if record.text.len() >= names::MAX_TEXT_RECORDS {
-            return Err(format!(
-                "at most {} text records per name",
-                names::MAX_TEXT_RECORDS
-            ));
-        }
-        record.text.push((key, v));
-        record.text.sort_by(|a, b| a.0.cmp(&b.0));
     }
+    names::set_owner_text(&mut record.text, &key, value)?;
     record.updated_ns = now;
     commit_flat(record, tax);
     Ok(())

@@ -204,7 +204,8 @@ service : {
   get_handle : (text) -> (opt Handle) query;
   set_handle_deployer : (text, opt principal) -> (Result);
 
-  // records, owner only
+  // records, owner only. set_text refuses the provenance keys (repo,
+  // commit, module_hash, deployer, announced_ns): only announce writes them.
   set_record : (text, Target) -> (Result);
   set_text : (text, text, opt text) -> (Result);
   delete_record : (text) -> (Result);
