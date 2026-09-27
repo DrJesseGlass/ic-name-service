@@ -81,7 +81,10 @@ and module_hash too, so announced provenance cannot be forged. A name
 never announced (every flat name, and scoped names deployed some other
 way) lets the owner set those three, for example to pin module_hash for
 the verifier. An owner repoint (`set_record`) to a different target drops
-all five, since they describe the old canister.
+all five, since they describe the old canister. Upgrading to schema 4
+drops any stored deployer and announced_ns records, because earlier
+versions let owners write them; announced names get them back on their
+next announce.
 
 The ic-git side is one optional module (canisters/git/src/names.rs there)
 behind `names_set_config(canister, handle)`: every repo of that instance is

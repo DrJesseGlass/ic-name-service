@@ -29,11 +29,12 @@ fn init() {
     certify::rebuild();
 }
 
-/// The certified tree is heap state and is rebuilt on every upgrade. The
-/// tag index is stable memory kept in step on every write, so it is only
-/// rebuilt when the schema version says the stored data predates it (an
-/// M0 canister had tags text records and no index). A newer schema than
-/// this code knows is refused rather than misread.
+/// The certified tree is heap state and is rebuilt on every upgrade, after
+/// any migration that rewrites records. The tag index is stable memory
+/// kept in step on every write, so it is only rebuilt when the schema
+/// version says the stored data predates it (an M0 canister had tags text
+/// records and no index). A newer schema than this code knows is refused
+/// rather than misread.
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     let from = store::schema_version();
@@ -42,6 +43,9 @@ fn post_upgrade() {
             "stable memory schema {from} is newer than this code's {}",
             store::SCHEMA
         ));
+    }
+    if from < 4 {
+        store::migrate_announce_marker_from_v3();
     }
     certify::rebuild();
     if from < 2 {
