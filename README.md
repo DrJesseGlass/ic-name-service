@@ -282,4 +282,10 @@ Once the canister is deployed, `tools/reproducible-build.sh --check`
 compares the built hash against the on-chain module hash, and verified.json
 records each attested tag.
 
+## Reporting
+
+A bug: https://github.com/DrJesseGlass/ic-name-service/issues/new/choose.
+A security problem: privately, through the form SECURITY.md names, never
+in a public issue.
+
 Conventions: pure ASCII in source, messages and docs; no unicode.
