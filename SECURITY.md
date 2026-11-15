@@ -24,8 +24,8 @@ that promise is in scope, in particular:
 - records and ownership (`canisters/names/src/lib.rs`, `store.rs`,
   `names.rs`): a handle, record or text record written or deleted by a
   caller who does not own the handle; an `announce` accepted from a
-  principal that is not on the deployer list, or under a handle that
-  neither belongs to that deployer nor named it with
+  principal that is not on the deployer list, or under a registered
+  handle that neither belongs to that deployer nor named it with
   `set_handle_deployer`; provenance (repo, commit, module_hash, deployer,
   announced_ns) forged or kept on a name it does not describe; an admin
   method (deployer list, tax and auction config, treasury, domains)
@@ -41,8 +41,8 @@ that promise is in scope, in particular:
   the ledger calls): a name held, bought or won without paying for it; a
   deposit, prepaid balance or credit lost, paid twice, or withdrawn by
   someone it is not owed to; `fund_self` moving more than collected tax;
-  a sealed bid that can be read before the reveal phase ends, or a
-  commitment that opens to two amounts; an auction closed early, or won
+  a bid amount that can be read from the canister before its auction
+  has ended, or a commitment that opens to two amounts; an auction closed early, or won
   for less than the second price or the reserve; counters that stop
   matching the ledger account;
 - the HTTP gateway (`gateway.rs`): a `/<name>` redirect to a canister
@@ -68,8 +68,10 @@ and is reported here.
   one is.
 - A listed deployer is trusted for what it announces. `announce` is
   believed because of who calls it, not what is in it (DESIGN.md
-  section 8). A deployer announcing something false under a handle it may
-  write is that deployer's bug.
+  section 8), and a handle nobody has registered goes to the first
+  deployer that announces under it (README, "Announce"). A deployer
+  announcing something false under a handle it may write is that
+  deployer's bug.
 - The gateway's responses are served with a skip-certification
   expression, on purpose (README, "HTTP gateway, stage 1"). A 302 or an
   `/api/...` body is not itself proof of anything; the proof is the
