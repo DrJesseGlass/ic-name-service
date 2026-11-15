@@ -42,9 +42,9 @@ that promise is in scope, in particular:
   deposit, prepaid balance or credit lost, paid twice, or withdrawn by
   someone it is not owed to; `fund_self` moving more than collected tax;
   a bid amount that can be read from the canister before its auction
-  has ended, or a commitment that opens to two amounts; an auction closed early, or won
-  for less than the second price or the reserve; counters that stop
-  matching the ledger account;
+  has ended, or a commitment that opens to two amounts; an auction
+  closed early, or won for less than the second price or the reserve;
+  counters that stop matching the ledger account;
 - the HTTP gateway (`gateway.rs`): a `/<name>` redirect to a canister
   other than the one the name resolves to; the handover page skipped
   inside its window; markup from a name or a text record executing in a
