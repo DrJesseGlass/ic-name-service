@@ -1377,7 +1377,6 @@ version = "0.1.0"
 dependencies = [
  "candid",
  "ic-agent",
- "ic-certification",
  "serde",
  "serde_cbor",
  "tokio",
