@@ -1,0 +1,79 @@
+# Dependabot: security updates for every advisory against a dependency in
+# the repo (GitHub's advisory database includes RustSec), and routine
+# version updates on the schedules below. Each update is a pull request.
+# There is no CI workflow in this repo yet, so nothing tests one for you:
+# run `cargo test -p name_canister` and tools/smoke-test.sh on its branch
+# before merging.
+#
+# Merging one changes nothing on chain. ic-git installs the committed
+# deploy/name_canister.wasm, so a Cargo.lock change reaches the canister
+# only when a release is staged from it (tools/stage-artifact.sh), pushed
+# to ic-git, and recorded in verified.json. A Cargo.lock change changes
+# the module hash, so it is released and recorded like any other change.
+#
+# Dependabot pushes its pull requests to branches named dependabot/<...>.
+# Git cannot create those while a branch named plainly `dependabot` exists
+# (a ref cannot be both a file and a directory), and Dependabot then opens
+# nothing, silently from the repo's side. Never name a branch `dependabot`;
+# the job log under Insights > Dependency graph > Dependabot shows the
+# failure when it happens.
+version: 2
+updates:
+  # The canister workspace: canisters/names, built from the root
+  # Cargo.lock, the input to the attested module hash.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      # Patch and minor bumps arrive as one pull request a week rather than
+      # one per crate; a major bump, or a security update, comes on its own.
+      cargo-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Kept at the versions ic-git uses (canisters/names/Cargo.toml,
+      # DESIGN.md section 9): at 0.x a minor bump is a breaking one, so
+      # only patches come on their own. ic-auction is this project's own
+      # crate and moves by hand with its releases.
+      - dependency-name: ic-cdk
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: candid
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: ic-stable-structures
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: ic-auction
+      # Held: candid's ic_principal, ic-certification and ic-auction all
+      # require sha2 0.10, so moving this crate's own sha2 to 0.11 would
+      # put two copies of sha2 and digest in the attested module. Same
+      # hold as ic-git and ic-vote; lift it with theirs, when those three
+      # are on the digest 0.11 generation. Updates within 0.10 still come,
+      # security ones included.
+      - dependency-name: sha2
+        versions: [">=0.11"]
+
+  # The verifier: its own workspace and lock (tools/verify/Cargo.toml),
+  # outside the attested module. It runs on the checker's machine, so an
+  # advisory against ic-agent or its tree matters here even though it
+  # never touches the canister.
+  - package-ecosystem: cargo
+    directory: /tools/verify
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: deps(verify)
+    groups:
+      verify:
+        patterns: ["*"]
+
+# Not covered, deliberately:
+#   Dockerfile.build      the base image and dfx are part of the build
+#   rust-toolchain.toml   recipe, so changing them changes the module hash
+#                         for every release after; they are bumped by hand,
+#                         together, with ic-git's.
+#   github-actions        there are no workflows. Add the ecosystem, as in
+#                         ic-git's dependabot.yml, with the first one.
