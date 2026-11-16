@@ -267,6 +267,10 @@ key and is never correct against mainnet.
     tools/reproducible-build.sh        native build, prints the module sha256
     tools/reproducible-build.sh --docker   the portable build that attestations use
 
+Every pull request runs the first line, a wasm build and a build of
+tools/verify (.github/workflows/ci.yml). The smoke test needs a replica
+and is run by hand.
+
 Toolchain pins: rust 1.94.1 (rust-toolchain.toml), dfx 0.31.0. Build through
 the script, not a bare `dfx build`, so the path remapping applies and the
 hash is machine independent.
