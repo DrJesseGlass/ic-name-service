@@ -34,8 +34,8 @@
 //! Exit codes: 0 verified, 1 verification failed, 2 usage or transport.
 
 use candid::{CandidType, Decode, Encode, Principal};
-use ic_agent::Agent;
-use ic_certification::{Certificate, HashTree, LookupResult};
+use ic_agent::hash_tree::{HashTree, LookupResult};
+use ic_agent::{Agent, Certificate};
 use serde::Deserialize;
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -253,7 +253,7 @@ async fn main() {
         ],
     )
     .unwrap_or_else(|e| fail("B", format!("certified_data not in certificate: {e}")));
-    let witness: HashTree = serde_cbor::from_slice(&resolved.witness)
+    let witness: HashTree<Vec<u8>> = serde_cbor::from_slice(&resolved.witness)
         .unwrap_or_else(|e| fail("B", format!("witness cbor: {e}")));
     let digest = witness.digest();
     if certified_data != digest.as_slice() {
