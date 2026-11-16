@@ -87,9 +87,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "candid"
-version = "0.10.36"
+version = "0.10.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "688dc9917e4fd15d7656d46f9dbf45ca0151ca13158875894b40e22c27681d86"
+checksum = "eabf7c87ac020b0d9e07b02b63e6a109224044a524ce5b7ce98307bc5ea4d7e1"
 dependencies = [
  "anyhow",
  "binrw",
@@ -110,9 +110,9 @@ dependencies = [
 
 [[package]]
 name = "candid_derive"
-version = "0.10.36"
+version = "0.10.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b33ea2fcb595b01cc1188d51c8fcf0455220779f6fd5f9b88e280d8c602baa1"
+checksum = "b6d61cd9491fc0ef12a5d2106b742e0e166026afc9e20cadd82d3f1e695cf7fc"
 dependencies = [
  "lazy_static",
  "proc-macro2",
@@ -308,9 +308,9 @@ dependencies = [
 
 [[package]]
 name = "ic-certification"
-version = "4.0.0"
+version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d58eda9bd0b012356ff1bd00d95cb25ea0235699f5475c288b2b6bbe68225cd"
+checksum = "d41cabeea5bd5004599c306e77cca0c64c44d8a74416fdae54ea6262da804b19"
 dependencies = [
  "hex",
  "serde",
@@ -557,9 +557,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
  "itoa",
  "memchr",
