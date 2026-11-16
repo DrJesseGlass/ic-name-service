@@ -264,9 +264,9 @@ dependencies = [
 
 [[package]]
 name = "candid"
-version = "0.10.36"
+version = "0.10.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "688dc9917e4fd15d7656d46f9dbf45ca0151ca13158875894b40e22c27681d86"
+checksum = "eabf7c87ac020b0d9e07b02b63e6a109224044a524ce5b7ce98307bc5ea4d7e1"
 dependencies = [
  "anyhow",
  "binrw",
@@ -287,9 +287,9 @@ dependencies = [
 
 [[package]]
 name = "candid_derive"
-version = "0.10.36"
+version = "0.10.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b33ea2fcb595b01cc1188d51c8fcf0455220779f6fd5f9b88e280d8c602baa1"
+checksum = "b6d61cd9491fc0ef12a5d2106b742e0e166026afc9e20cadd82d3f1e695cf7fc"
 dependencies = [
  "lazy_static",
  "proc-macro2",
@@ -960,9 +960,9 @@ dependencies = [
 
 [[package]]
 name = "ic-agent"
-version = "0.49.2"
+version = "0.49.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f9086b59107b6d6485a915762a2a3986ef208e80bb40eff22d099bbcd71deea"
+checksum = "4ac2c4f1ac865dce73eb8b14b3e08029af24347f1d4307f69ac52c2172b78e3a"
 dependencies = [
  "arc-swap",
  "async-channel 2.5.0",
@@ -981,7 +981,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "ic-certification",
+ "ic-certification 3.2.0",
  "ic-ed25519",
  "ic-transport-types",
  "ic-verify-bls-signature",
@@ -1021,6 +1021,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ic-certification"
+version = "4.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d41cabeea5bd5004599c306e77cca0c64c44d8a74416fdae54ea6262da804b19"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_bytes",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ic-ed25519"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1039,13 +1051,13 @@ dependencies = [
 
 [[package]]
 name = "ic-transport-types"
-version = "0.49.2"
+version = "0.49.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2d13d859ea481e8d5766a54a3b4dfcf4c11ff6f21d5e2aeaf9a44dd710a76ff"
+checksum = "dfaa92cecba48dcd4ef3b626847bb1f54f0d90fb2f1471755141d385f8ffc42c"
 dependencies = [
  "candid",
  "hex",
- "ic-certification",
+ "ic-certification 3.2.0",
  "leb128",
  "serde",
  "serde_bytes",
@@ -1377,7 +1389,7 @@ version = "0.1.0"
 dependencies = [
  "candid",
  "ic-agent",
- "ic-certification",
+ "ic-certification 4.0.1",
  "serde",
  "serde_cbor",
  "tokio",
@@ -2268,9 +2280,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
