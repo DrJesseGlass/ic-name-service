@@ -1,9 +1,9 @@
 # Dependabot: security updates for every advisory against a dependency in
 # the repo (GitHub's advisory database includes RustSec), and routine
-# version updates on the schedules below. Each update is a pull request.
-# There is no CI workflow in this repo yet, so nothing tests one for you:
-# run `cargo test -p name_canister` and tools/smoke-test.sh on its branch
-# before merging.
+# version updates on the schedules below. Each update is a pull request,
+# tested by ci.yml: unit tests, the wasm build and the verifier's build.
+# ci.yml does not start a replica, so for anything beyond a patch bump run
+# tools/smoke-test.sh on the branch before merging.
 #
 # Merging one changes nothing on chain. ic-git installs the committed
 # deploy/name_canister.wasm, so a Cargo.lock change reaches the canister
@@ -70,10 +70,19 @@ updates:
       verify:
         patterns: ["*"]
 
+  # The workflow's actions.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
 # Not covered, deliberately:
 #   Dockerfile.build      the base image and dfx are part of the build
 #   rust-toolchain.toml   recipe, so changing them changes the module hash
 #                         for every release after; they are bumped by hand,
 #                         together, with ic-git's.
-#   github-actions        there are no workflows. Add the ecosystem, as in
-#                         ic-git's dependabot.yml, with the first one.

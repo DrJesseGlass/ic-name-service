@@ -1,0 +1,59 @@
+# Tests every pull request, Dependabot's included: the canister's unit
+# tests and its wasm build, the verifier's build, and the ASCII rule. The
+# live half (tools/smoke-test.sh: a local replica, the cycles ledger, the
+# verifier against real certificates, an upgrade) is run by hand before a
+# release; this only says the change compiles and passes offline.
+#
+# It holds no secret and deploys nothing, and must stay that way. What
+# runs on chain is decided by a push to ic-git of a wasm built in the
+# pinned container (tools/stage-artifact.sh), not here. This build is not
+# that one: no path remapping, no ic-wasm, so its hash means nothing.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # The root workspace, built from the root Cargo.lock.
+  canister:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # rust-toolchain.toml pins the channel and the wasm target; rustup on
+      # the runner installs them on first use. --locked on both steps: the
+      # committed Cargo.lock is the input to the attested module hash, so a
+      # change that would rewrite it fails here rather than passing on a
+      # dependency graph nobody committed.
+      - name: Canister tests
+        run: cargo test --locked -q -p name_canister
+      - name: Wasm build
+        run: cargo build --locked -q --target wasm32-unknown-unknown --release -p name_canister
+      - name: Every tracked text file is pure ASCII
+        run: |
+          if git grep -I -n -P '[^\x00-\x7F]'; then
+            echo "non-ASCII bytes in the lines above" >&2
+            exit 1
+          fi
+      - name: Shell scripts parse
+        run: for f in tools/*.sh; do bash -n "$f"; done
+
+  # tools/verify is its own workspace with its own lock, so the canister
+  # job never compiles it. A dependency bump there that breaks the build
+  # (two versions of a crate whose types cross ic-agent's API, say) shows
+  # up only here.
+  verifier:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: tools/verify
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verifier build
+        run: cargo build --locked -q

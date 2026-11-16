@@ -15,8 +15,18 @@
 # smoke-local, created on first run), because an encrypted default identity
 # prompts for a password on every call and cannot run unattended.
 set -euo pipefail
-# Most checks are a bare grep; name the line that failed.
+# Name the line that failed.
 trap 'echo "FAILED at line $LINENO" >&2' ERR
+# Most checks are `... | want <pattern>`: grep, except that a miss prints
+# what came instead. A canister refusal is an Err on stdout, and a bare
+# grep for Ok threw the reason away. Checks that a pattern is absent stay
+# a plain grep, since there a miss is the pass.
+want() {
+  local got; got=$(cat)
+  printf '%s\n' "$got" | grep >/dev/null -e "$1" && return 0
+  { echo "wanted: $1"; echo "got   : $got"; } >&2
+  return 1
+}
 cd "$(dirname "$0")/.."
 
 id=${DFX_IDENTITY:-smoke-local}
@@ -44,119 +54,119 @@ treasury_field() { call treasury | grep -o "$1 = [0-9_]*" | tr -d '_' | awk '{pr
 call remove_deployer "(principal \"$me\")" >/dev/null 2>&1 || true
 
 echo "--- register handle $handle"
-call register_handle "(\"$handle\")" | grep >/dev/null 'Ok' || { echo "register_handle failed" >&2; exit 1; }
+call register_handle "(\"$handle\")" | want 'Ok' || { echo "register_handle failed" >&2; exit 1; }
 echo "--- taken handle is refused"
-call register_handle "(\"$handle\")" | grep >/dev/null 'Err' || { echo "expected Err on duplicate handle" >&2; exit 1; }
+call register_handle "(\"$handle\")" | want 'Err' || { echo "expected Err on duplicate handle" >&2; exit 1; }
 
 echo "--- set_record $handle/app -> address $target"
-call set_record "(\"$handle/app\", variant { address = principal \"$target\" })" | grep >/dev/null 'Ok'
+call set_record "(\"$handle/app\", variant { address = principal \"$target\" })" | want 'Ok'
 echo "--- set_text description"
-call set_text "(\"$handle/app\", \"description\", opt \"smoke test app $handle\")" | grep >/dev/null 'Ok'
+call set_text "(\"$handle/app\", \"description\", opt \"smoke test app $handle\")" | want 'Ok'
 echo "--- set_record $handle/www -> alias $handle/app"
-call set_record "(\"$handle/www\", variant { alias = \"$handle/app\" })" | grep >/dev/null 'Ok'
+call set_record "(\"$handle/www\", variant { alias = \"$handle/app\" })" | want 'Ok'
 
 echo "--- list_names"
-call list_names "(\"$handle\")" | grep >/dev/null "$handle/app" 
+call list_names "(\"$handle\")" | want "$handle/app" 
 
 echo "--- resolve $handle/www (one alias hop)"
 out=$(call resolve "(\"$handle/www\")")
-echo "$out" | grep >/dev/null "canister = principal \"$target\"" || { echo "wrong canister in resolve:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null 'certificate = opt blob' || { echo "no certificate in resolve:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null 'witness = blob' || { echo "no witness in resolve:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null 'smoke test app' || { echo "text record missing from chain:"; echo "$out"; exit 1; }
+echo "$out" | want "canister = principal \"$target\"" || { echo "wrong canister in resolve:"; echo "$out"; exit 1; }
+echo "$out" | want 'certificate = opt blob' || { echo "no certificate in resolve:"; echo "$out"; exit 1; }
+echo "$out" | want 'witness = blob' || { echo "no witness in resolve:"; echo "$out"; exit 1; }
+echo "$out" | want 'smoke test app' || { echo "text record missing from chain:"; echo "$out"; exit 1; }
 hops=$(echo "$out" | grep -o 'name = "' | wc -l | tr -d ' ')
 # Resolved.name plus two chain entries.
 [ "$hops" = 3 ] || { echo "expected 2 hops in chain, got $((hops-1))"; echo "$out"; exit 1; }
 
 echo "--- resolve of a missing name is Err"
-call resolve "(\"$handle/missing\")" | grep >/dev/null 'Err' 
+call resolve "(\"$handle/missing\")" | want 'Err' 
 
 echo "--- alias loop is refused"
-call set_record "(\"$handle/a\", variant { alias = \"$handle/b\" })" | grep >/dev/null 'Ok'
-call set_record "(\"$handle/b\", variant { alias = \"$handle/a\" })" | grep >/dev/null 'Ok'
-call resolve "(\"$handle/a\")" | grep >/dev/null 'alias loop' 
+call set_record "(\"$handle/a\", variant { alias = \"$handle/b\" })" | want 'Ok'
+call set_record "(\"$handle/b\", variant { alias = \"$handle/a\" })" | want 'Ok'
+call resolve "(\"$handle/a\")" | want 'alias loop' 
 
 echo "--- delete_record then resolve is Err"
-call delete_record "(\"$handle/www\")" | grep >/dev/null 'Ok'
-call resolve "(\"$handle/www\")" | grep >/dev/null 'Err'
+call delete_record "(\"$handle/www\")" | want 'Ok'
+call resolve "(\"$handle/www\")" | want 'Err'
 
 echo "--- other identity cannot write under $handle"
 dfx identity new --storage-mode plaintext smoke-other >/dev/null 2>&1 || true
 dfx canister call --identity smoke-other names set_record \
-  "(\"$handle/app\", variant { address = principal \"aaaaa-aa\" })" | grep >/dev/null 'does not own' 
+  "(\"$handle/app\", variant { address = principal \"aaaaa-aa\" })" | want 'does not own' 
 
 echo "--- independent verifier: certificate, root, leaves, chain"
 verify=tools/verify/target/release/names-verify
 if [ ! -x "$verify" ]; then
   (cd tools/verify && cargo build --release >/dev/null 2>&1)
 fi
-$verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$handle/app" | grep >/dev/null '^VERIFIED' 
+$verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$handle/app" | want '^VERIFIED' 
 echo "--- forged witness fails at B"
 # The verifier exits 1 on a failed check, which under pipefail would end
 # the script before grep sees the line, so capture first.
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" --tamper witness "$handle/app" || true)
-echo "$out" | grep >/dev/null '^FAILED at B' || { echo "tampered witness not caught:"; echo "$out"; exit 1; }
+echo "$out" | want '^FAILED at B' || { echo "tampered witness not caught:"; echo "$out"; exit 1; }
 echo "--- forged record fails at C"
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" --tamper record "$handle/app" || true)
-echo "$out" | grep >/dev/null '^FAILED at C' || { echo "tampered record not caught:"; echo "$out"; exit 1; }
+echo "$out" | want '^FAILED at C' || { echo "tampered record not caught:"; echo "$out"; exit 1; }
 
 echo "--- announce: not a deployer is refused"
 commit=$(printf 'ab%.0s' $(seq 20))
 hash=$(printf 'cd%.0s' $(seq 32))
 ann="(record { name = \"$handle/pushed\"; canister = principal \"$target\"; repo = \"pushed\"; commit = \"$commit\"; module_hash = \"$hash\" })"
-call announce "$ann" | grep >/dev/null 'not a listed deployer' 
+call announce "$ann" | want 'not a listed deployer' 
 echo "--- add_deployer by a non-controller is refused"
-dfx canister call --identity smoke-other names add_deployer "(principal \"$me\")" | grep >/dev/null 'not a controller' 
+dfx canister call --identity smoke-other names add_deployer "(principal \"$me\")" | want 'not a controller' 
 echo "--- controller lists the smoke identity as a deployer"
-call add_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
-call list_deployers | grep >/dev/null "$me"
+call add_deployer "(principal \"$me\")" | want 'Ok'
+call list_deployers | want "$me"
 echo "--- announce under own handle fills provenance"
-call announce "$ann" | grep >/dev/null 'Ok'
+call announce "$ann" | want 'Ok'
 out=$(call get_record "(\"$handle/pushed\")")
-echo "$out" | grep >/dev/null "\"$hash\"" || { echo "module_hash missing:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null "\"$commit\"" || { echo "commit missing:"; echo "$out"; exit 1; }
+echo "$out" | want "\"$hash\"" || { echo "module_hash missing:"; echo "$out"; exit 1; }
+echo "$out" | want "\"$commit\"" || { echo "commit missing:"; echo "$out"; exit 1; }
 echo "--- announce under an unregistered handle registers it to the deployer"
-call announce "(record { name = \"$handle-auto/x\"; canister = principal \"$target\"; repo = \"x\"; commit = \"$commit\"; module_hash = \"$hash\" })" | grep >/dev/null 'Ok'
-call handle_owner "(\"$handle-auto\")" | grep >/dev/null "$me"
+call announce "(record { name = \"$handle-auto/x\"; canister = principal \"$target\"; repo = \"x\"; commit = \"$commit\"; module_hash = \"$hash\" })" | want 'Ok'
+call handle_owner "(\"$handle-auto\")" | want "$me"
 echo "--- announce under another owner's handle needs set_handle_deployer"
 other=$(dfx identity get-principal --identity smoke-other)
-dfx canister call --identity smoke-other names register_handle "(\"$handle-o\")" | grep >/dev/null 'Ok'
-call announce "(record { name = \"$handle-o/y\"; canister = principal \"$target\"; repo = \"y\"; commit = \"$commit\"; module_hash = \"$hash\" })" | grep >/dev/null 'does not allow deployer' 
-dfx canister call --identity smoke-other names set_handle_deployer "(\"$handle-o\", opt principal \"$me\")" | grep >/dev/null 'Ok'
-call announce "(record { name = \"$handle-o/y\"; canister = principal \"$target\"; repo = \"y\"; commit = \"$commit\"; module_hash = \"$hash\" })" | grep >/dev/null 'Ok'
-call get_record "(\"$handle-o/y\")" | grep >/dev/null "owner = principal \"$other\"" 
+dfx canister call --identity smoke-other names register_handle "(\"$handle-o\")" | want 'Ok'
+call announce "(record { name = \"$handle-o/y\"; canister = principal \"$target\"; repo = \"y\"; commit = \"$commit\"; module_hash = \"$hash\" })" | want 'does not allow deployer' 
+dfx canister call --identity smoke-other names set_handle_deployer "(\"$handle-o\", opt principal \"$me\")" | want 'Ok'
+call announce "(record { name = \"$handle-o/y\"; canister = principal \"$target\"; repo = \"y\"; commit = \"$commit\"; module_hash = \"$hash\" })" | want 'Ok'
+call get_record "(\"$handle-o/y\")" | want "owner = principal \"$other\"" 
 echo "--- bad module_hash is refused"
-call announce "(record { name = \"$handle/pushed\"; canister = principal \"$target\"; repo = \"pushed\"; commit = \"$commit\"; module_hash = \"nothex\" })" | grep >/dev/null 'Err'
+call announce "(record { name = \"$handle/pushed\"; canister = principal \"$target\"; repo = \"pushed\"; commit = \"$commit\"; module_hash = \"nothex\" })" | want 'Err'
 echo "--- remove_deployer"
-call remove_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
-call announce "$ann" | grep >/dev/null 'not a listed deployer' 
+call remove_deployer "(principal \"$me\")" | want 'Ok'
+call announce "$ann" | want 'not a listed deployer' 
 
 echo "--- tags: bad values refused, good value indexed"
-call set_text "(\"$handle/app\", \"tags\", opt \"git, deploy\")" | grep >/dev/null 'Err'
-call set_text "(\"$handle/app\", \"tags\", opt \"git,git\")" | grep >/dev/null 'Err'
-call set_text "(\"$handle/app\", \"tags\", opt \"git,smoke-$handle\")" | grep >/dev/null 'Ok'
-call tags | grep >/dev/null "smoke-$handle"
+call set_text "(\"$handle/app\", \"tags\", opt \"git, deploy\")" | want 'Err'
+call set_text "(\"$handle/app\", \"tags\", opt \"git,git\")" | want 'Err'
+call set_text "(\"$handle/app\", \"tags\", opt \"git,smoke-$handle\")" | want 'Ok'
+call tags | want "smoke-$handle"
 echo "--- search by substring of the description"
 out=$(call search "(record { q = opt \"SMOKE TEST APP $handle\" })")
-echo "$out" | grep >/dev/null "$handle/app" || { echo "search by description failed:"; echo "$out"; exit 1; }
+echo "$out" | want "$handle/app" || { echo "search by description failed:"; echo "$out"; exit 1; }
 echo "--- search by tag, paged"
 out=$(call search "(record { tag = opt \"smoke-$handle\"; limit = opt 1 })")
-echo "$out" | grep >/dev/null 'total = 1 : nat32' || { echo "search by tag failed:"; echo "$out"; exit 1; }
+echo "$out" | want 'total = 1 : nat32' || { echo "search by tag failed:"; echo "$out"; exit 1; }
 echo "--- retag drops the old tag"
-call set_text "(\"$handle/app\", \"tags\", opt \"deploy\")" | grep >/dev/null 'Ok'
+call set_text "(\"$handle/app\", \"tags\", opt \"deploy\")" | want 'Ok'
 out=$(call search "(record { tag = opt \"smoke-$handle\" })")
-echo "$out" | grep >/dev/null 'total = 0 : nat32' || { echo "old tag still indexed:"; echo "$out"; exit 1; }
+echo "$out" | want 'total = 0 : nat32' || { echo "old tag still indexed:"; echo "$out"; exit 1; }
 echo "--- announce with the real module hash, then verifier check E passes"
 live=$(dfx canister info names | awk '/Module hash/{sub(/^0x/, "", $3); print $3}')
-call add_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
-call announce "(record { name = \"$handle/self\"; canister = principal \"$target\"; repo = \"ic-name-service\"; commit = \"$commit\"; module_hash = \"$live\" })" | grep >/dev/null 'Ok'
+call add_deployer "(principal \"$me\")" | want 'Ok'
+call announce "(record { name = \"$handle/self\"; canister = principal \"$target\"; repo = \"ic-name-service\"; commit = \"$commit\"; module_hash = \"$live\" })" | want 'Ok'
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$handle/self" || true)
-echo "$out" | grep >/dev/null '^E module hash       : ok' || { echo "check E did not pass on a true pin:"; echo "$out"; exit 1; }
+echo "$out" | want '^E module hash       : ok' || { echo "check E did not pass on a true pin:"; echo "$out"; exit 1; }
 echo "--- a stale pin fails check E"
-call announce "(record { name = \"$handle/stale\"; canister = principal \"$target\"; repo = \"ic-name-service\"; commit = \"$commit\"; module_hash = \"$hash\" })" | grep >/dev/null 'Ok'
+call announce "(record { name = \"$handle/stale\"; canister = principal \"$target\"; repo = \"ic-name-service\"; commit = \"$commit\"; module_hash = \"$hash\" })" | want 'Ok'
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$handle/stale" || true)
-echo "$out" | grep >/dev/null '^FAILED at E' || { echo "stale pin not caught:"; echo "$out"; exit 1; }
-call remove_deployer "(principal \"$me\")" | grep >/dev/null 'Ok'
+echo "$out" | want '^FAILED at E' || { echo "stale pin not caught:"; echo "$out"; exit 1; }
+call remove_deployer "(principal \"$me\")" | want 'Ok'
 
 echo "--- flat names: local cycles ledger"
 ledger=um5iw-rqaaa-aaaaq-qaaba-cai
@@ -175,7 +185,7 @@ fund() { # fund <identity> <cycles>: deposit from the identity's local wallet
 }
 approve() { # approve <identity>: let the names canister pull up to 10T
   dfx canister call --identity "$1" $ledger icrc2_approve \
-    "(record { spender = record { owner = principal \"$names\" }; amount = 10_000_000_000_000 })" | grep >/dev/null 'Ok'
+    "(record { spender = record { owner = principal \"$names\" }; amount = 10_000_000_000_000 })" | want 'Ok'
 }
 bal() { dfx canister call --identity "$id" $ledger icrc1_balance_of "(record { owner = principal \"$1\" })" | tr -d '_ ()nat:' ; }
 fund smoke-local 5000000000000
@@ -185,10 +195,10 @@ approve smoke-other
 # Auctions: the commitment comes from the canister's helper (tests only;
 # a real bidder computes it locally), and a phase is waited for by polling.
 auction_cfg() { # auction_cfg <commit s> <reveal s>
-  call set_auction_config "(record { commit_ns = $1_000_000_000 : nat64; reveal_ns = $2_000_000_000 : nat64; reserve = 0 })" | grep >/dev/null 'Ok'
+  call set_auction_config "(record { commit_ns = $1_000_000_000 : nat64; reveal_ns = $2_000_000_000 : nat64; reserve = 0 })" | want 'Ok'
 }
 harb_cfg() { # harb_cfg <rate_bps> <grace s> <open>
-  call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = $1 : nat32; min_price = 1_000_000_000; grace_ns = $2_000_000_000 : nat64; fee = 0; flat_names_open = $3; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+  call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = $1 : nat32; min_price = 1_000_000_000; grace_ns = $2_000_000_000 : nat64; fee = 0; flat_names_open = $3; handover_warn_ns = 30_000_000_000 : nat64 })" | want 'Ok'
 }
 commitment() { # commitment <identity> <amount> <salt>: a candid blob literal
   local p; p=$(dfx identity get-principal --identity "$1")
@@ -207,155 +217,155 @@ wait_phase() { # wait_phase <name> <phase>: 40 s at most
   echo "auction $1 never reached $2"; call auction_status "(\"$1\")"; exit 1
 }
 win() { # win <identity> <name> <alias_to> <amount> <deposit>: a lone bid through a whole auction
-  bid_as "$1" "$2" "$4" "$5" "s-$2" | grep >/dev/null 'Ok' || { echo "bid on $2 failed"; exit 1; }
+  bid_as "$1" "$2" "$4" "$5" "s-$2" | want 'Ok' || { echo "bid on $2 failed"; exit 1; }
   wait_phase "$2" reveal
-  reveal_as "$1" "$2" "$4" "s-$2" "$3" | grep >/dev/null 'Ok' || { echo "reveal on $2 failed"; exit 1; }
+  reveal_as "$1" "$2" "$4" "s-$2" "$3" | want 'Ok' || { echo "reveal on $2 failed"; exit 1; }
   wait_phase "$2" closed
-  call close_auction "(\"$2\")" | grep >/dev/null 'Ok' || { echo "close of $2 failed"; exit 1; }
+  call close_auction "(\"$2\")" | want 'Ok' || { echo "close of $2 failed"; exit 1; }
 }
 credit_of() { call credit "(principal \"$1\")" | tr -d '_ ()nat:'; }
 other=$(dfx identity get-principal --identity smoke-other)
 
 echo "--- the market is closed by default: bidding is refused"
-call harberger_config | grep >/dev/null 'flat_names_open = false' || call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 700 : nat32; min_price = 100_000_000_000; grace_ns = 2_592_000_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
-bid_as smoke-local "closed$run" 1_000_000_000_000 1_100_000_000_000 x | grep >/dev/null 'not open'
+call harberger_config | want 'flat_names_open = false' || call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 700 : nat32; min_price = 100_000_000_000; grace_ns = 2_592_000_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | want 'Ok'
+bid_as smoke-local "closed$run" 1_000_000_000_000 1_100_000_000_000 x | want 'not open'
 echo "--- fast tax and auctions for the test: 100 percent per year, 10 second grace, 15+30 second phases, market open"
 # Phases and grace are wall-clock; they are generous because the local
 # replica is shared, and another project's tests can slow every call.
 harb_cfg 10000 10 true
 auction_cfg 15 30
-call auction_config | grep >/dev/null 'commit_ns = 15_000_000_000'
+call auction_config | want 'commit_ns = 15_000_000_000'
 flat="fl$run-a"
 echo "--- auction $flat: bad bids are refused before any pull"
-call bid "(\"$flat\", blob \"short\", 1_100_000_000_000)" | grep >/dev/null '32 bytes'
-bid_as smoke-local "$flat" 1_000_000_000_000 1 s-a | grep >/dev/null 'reserve'
-call bid "(\"$handle/app\", $(commitment smoke-local 1 x), 1_100_000_000_000)" | grep >/dev/null 'Err'
+call bid "(\"$flat\", blob \"short\", 1_100_000_000_000)" | want '32 bytes'
+bid_as smoke-local "$flat" 1_000_000_000_000 1 s-a | want 'reserve'
+call bid "(\"$handle/app\", $(commitment smoke-local 1 x), 1_100_000_000_000)" | want 'Err'
 echo "--- two sealed bids: 1T from $id, 400B from smoke-other"
-bid_as smoke-local "$flat" 1_000_000_000_000 1_100_000_000_000 s-a | grep >/dev/null 'Ok'
-bid_as smoke-other "$flat" 400_000_000_000 500_000_000_000 s-b | grep >/dev/null 'Ok'
+bid_as smoke-local "$flat" 1_000_000_000_000 1_100_000_000_000 s-a | want 'Ok'
+bid_as smoke-other "$flat" 400_000_000_000 500_000_000_000 s-b | want 'Ok'
 out=$(call auction_status "(\"$flat\")")
-echo "$out" | grep >/dev/null "principal \"$me\"" && echo "$out" | grep >/dev/null "principal \"$other\"" || { echo "bidders missing:"; echo "$out"; exit 1; }
+echo "$out" | want "principal \"$me\"" && echo "$out" | want "principal \"$other\"" || { echo "bidders missing:"; echo "$out"; exit 1; }
 [ "$(treasury_field escrowed)" -ge 1600000000000 ] || { echo "escrow not counted"; call treasury; exit 1; }
-reveal_as smoke-local "$flat" 1_000_000_000_000 s-a "$handle/app" | grep >/dev/null 'not started'
-call auctions | grep >/dev/null "name = \"$flat\""
+reveal_as smoke-local "$flat" 1_000_000_000_000 s-a "$handle/app" | want 'not started'
+call auctions | want "name = \"$flat\""
 echo "--- closing the market stops new bids, not reveals or the close"
 harb_cfg 10000 10 false
-bid_as smoke-other "fl$run-z" 400_000_000_000 500_000_000_000 s-z | grep >/dev/null 'not open'
+bid_as smoke-other "fl$run-z" 400_000_000_000 500_000_000_000 s-z | want 'not open'
 wait_phase "$flat" reveal
-call close_auction "(\"$flat\")" | grep >/dev/null 'still open'
-bid_as smoke-other "$flat" 400_000_000_000 500_000_000_000 s-b | grep >/dev/null 'Err'
-reveal_as smoke-local "$flat" 1_000_000_000_000 s-a nope | grep >/dev/null 'must alias a scoped name'
-reveal_as smoke-local "$flat" 1_000_000_000_000 wrong "$handle/app" | grep >/dev/null 'do not match'
-reveal_as smoke-local "$flat" 1_000_000_000_000 s-a "$handle/app" | grep >/dev/null 'Ok'
-reveal_as smoke-other "$flat" 400_000_000_000 s-b "$handle/app" | grep >/dev/null 'Ok'
+call close_auction "(\"$flat\")" | want 'still open'
+bid_as smoke-other "$flat" 400_000_000_000 500_000_000_000 s-b | want 'Err'
+reveal_as smoke-local "$flat" 1_000_000_000_000 s-a nope | want 'must alias a scoped name'
+reveal_as smoke-local "$flat" 1_000_000_000_000 wrong "$handle/app" | want 'do not match'
+reveal_as smoke-local "$flat" 1_000_000_000_000 s-a "$handle/app" | want 'Ok'
+reveal_as smoke-other "$flat" 400_000_000_000 s-b "$handle/app" | want 'Ok'
 wait_phase "$flat" closed
 out=$(call auction_status "(\"$flat\")" | tr -d '_')
-echo "$out" | grep >/dev/null "winner = opt principal \"$me\"" || { echo "wrong winner:"; echo "$out"; exit 1; }
+echo "$out" | want "winner = opt principal \"$me\"" || { echo "wrong winner:"; echo "$out"; exit 1; }
 echo "--- anyone closes it: the higher bid wins at the lower; losers and change are credited"
 mc0=$(credit_of "$me"); oc0=$(credit_of "$other"); a0=$(treasury_field auctioned)
 out=$(dfx canister call --identity smoke-other names close_auction "(\"$flat\")" | tr -d '_')
-echo "$out" | grep >/dev/null 'price = 400000000000 ' || { echo "not a second-price close:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null 'assessed = 1000000000000 ' || { echo "winner not assessed at their bid:"; echo "$out"; exit 1; }
+echo "$out" | want 'price = 400000000000 ' || { echo "not a second-price close:"; echo "$out"; exit 1; }
+echo "$out" | want 'assessed = 1000000000000 ' || { echo "winner not assessed at their bid:"; echo "$out"; exit 1; }
 # Opening balance is one grace period of tax at 1T; top it up before it runs out.
-call deposit "(\"$flat\", 100_000_000_000)" | grep >/dev/null 'Ok'
+call deposit "(\"$flat\", 100_000_000_000)" | want 'Ok'
 harb_cfg 10000 2 true
 [ $(( $(credit_of "$other") - oc0 )) -eq 500000000000 ] || { echo "loser not refunded in full"; exit 1; }
 change=$(( $(credit_of "$me") - mc0 ))
 [ "$change" -gt 699000000000 ] && [ "$change" -lt 700000000000 ] || { echo "winner change wrong: $change"; exit 1; }
 [ $(( $(treasury_field auctioned) - a0 )) -eq 400000000000 ] || { echo "price not in the treasury"; call treasury; exit 1; }
-call auction_status "(\"$flat\")" | grep >/dev/null '(null)'
+call auction_status "(\"$flat\")" | want '(null)'
 out=$(call flat_status "(\"$flat\")")
-echo "$out" | grep >/dev/null 'status = variant { active }' && echo "$out" | grep >/dev/null "owner = principal \"$me\"" || { echo "winner does not hold $flat:"; echo "$out"; exit 1; }
+echo "$out" | want 'status = variant { active }' && echo "$out" | want "owner = principal \"$me\"" || { echo "winner does not hold $flat:"; echo "$out"; exit 1; }
 echo "--- a held name cannot be bid on"
-bid_as smoke-other "$flat" 400_000_000_000 500_000_000_000 s-b | grep >/dev/null 'is owned by'
+bid_as smoke-other "$flat" 400_000_000_000 500_000_000_000 s-b | want 'is owned by'
 echo "--- flat name resolves through its alias and verifies (chain of 2)"
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$flat" || true)
-echo "$out" | grep >/dev/null '^VERIFIED' || { echo "flat name did not verify:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null 'chain               : 2'
+echo "$out" | want '^VERIFIED' || { echo "flat name did not verify:"; echo "$out"; exit 1; }
+echo "$out" | want 'chain               : 2'
 echo "--- owner reassesses to 2T; a stranger cannot"
-dfx canister call --identity smoke-other names set_price "(\"$flat\", 2_000_000_000_000)" | grep >/dev/null 'does not own'
-call set_price "(\"$flat\", 2_000_000_000_000)" | grep >/dev/null 'Ok'
+dfx canister call --identity smoke-other names set_price "(\"$flat\", 2_000_000_000_000)" | want 'does not own'
+call set_price "(\"$flat\", 2_000_000_000_000)" | want 'Ok'
 echo "--- buyer takes it at 2T, assessing 3T; seller is credited price plus unspent balance"
 credit0=$(call credit "(principal \"$me\")" | tr -d '_ ()nat:')
 echo "--- a buy capped below the current price is refused"
-dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000, 1_000_000_000_000)" | grep >/dev/null 'above your limit'
-dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000, 2_000_000_000_000)" | grep >/dev/null 'Ok'
-call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$other\""
+dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000, 1_000_000_000_000)" | want 'above your limit'
+dfx canister call --identity smoke-other names buy "(\"$flat\", \"$handle/app\", 3_000_000_000_000, 100_000_000_000, 2_000_000_000_000)" | want 'Ok'
+call flat_status "(\"$flat\")" | want "owner = principal \"$other\""
 echo "--- closing the market does not stop a buy of a held name"
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
-bid_as smoke-local "closed$run" 1_000_000_000_000 1_100_000_000_000 x | grep >/dev/null 'not open'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = false; handover_warn_ns = 30_000_000_000 : nat64 })" | want 'Ok'
+bid_as smoke-local "closed$run" 1_000_000_000_000 1_100_000_000_000 x | want 'not open'
 # Repoint at $handle/self, whose pinned module hash is the live one, so
 # the verifier's check E passes on the chain through this flat name.
-call buy "(\"$flat\", \"$handle/self\", 3_000_000_000_000, 100_000_000_000, 3_000_000_000_000)" | grep >/dev/null 'Ok'
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
-call flat_status "(\"$flat\")" | grep >/dev/null "owner = principal \"$me\""
+call buy "(\"$flat\", \"$handle/self\", 3_000_000_000_000, 100_000_000_000, 3_000_000_000_000)" | want 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | want 'Ok'
+call flat_status "(\"$flat\")" | want "owner = principal \"$me\""
 echo "--- the sold name remembers where it pointed, and the gateway warns instead of redirecting"
-call get_record "(\"$flat\")" | grep >/dev/null "previous_target = opt variant { alias = \"$handle/app\" }"
+call get_record "(\"$flat\")" | want "previous_target = opt variant { alias = \"$handle/app\" }"
 page=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
-echo "$page" | grep >/dev/null "<h1>$flat changed hands</h1>" || { echo "no handover page:"; echo "$page" | head -5; exit 1; }
-echo "$page" | grep >/dev/null "Continue to $handle/self"
-echo "$page" | grep >/dev/null "Go to $handle/app instead"
+echo "$page" | want "<h1>$flat changed hands</h1>" || { echo "no handover page:"; echo "$page" | head -5; exit 1; }
+echo "$page" | want "Continue to $handle/self"
+echo "$page" | want "Go to $handle/app instead"
 echo "--- the verifier warns about the recent change of target, and not outside its window"
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" "$flat" || true)
-echo "$out" | grep >/dev/null "^WARNING             : $flat changed hands" || { echo "verifier did not warn:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null '^VERIFIED' || { echo "sold name did not verify:"; echo "$out"; exit 1; }
+echo "$out" | want "^WARNING             : $flat changed hands" || { echo "verifier did not warn:"; echo "$out"; exit 1; }
+echo "$out" | want '^VERIFIED' || { echo "sold name did not verify:"; echo "$out"; exit 1; }
 out=$($verify --url http://127.0.0.1:4943 --insecure-local-root-key --canister "$names" --handover-warn-days 0 "$flat" || true)
 echo "$out" | grep >/dev/null '^WARNING' && { echo "verifier warned outside its window"; exit 1; }
-echo "$out" | grep >/dev/null '^VERIFIED' || { echo "sold name did not verify with a zero window:"; echo "$out"; exit 1; }
+echo "$out" | want '^VERIFIED' || { echo "sold name did not verify with a zero window:"; echo "$out"; exit 1; }
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/$flat")
 [ "$code" = 200 ] || { echo "handover page status $code"; exit 1; }
 echo "--- expiring lists the name with a deadline; a short window does not"
-call expiring "(1_000_000_000_000_000_000 : nat64)" | grep >/dev/null "name = \"$flat\""
+call expiring "(1_000_000_000_000_000_000 : nat64)" | want "name = \"$flat\""
 call expiring "(1 : nat64)" | grep >/dev/null "name = \"$flat\"" && { echo "expiring listed a name far from its deadline"; exit 1; }
 json=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/expiring?days=3650")
-echo "$json" | grep >/dev/null "\"name\":\"$flat\"" || { echo "api expiring wrong:"; echo "$json"; exit 1; }
+echo "$json" | want "\"name\":\"$flat\"" || { echo "api expiring wrong:"; echo "$json"; exit 1; }
 credit=$(( $(call credit "(principal \"$me\")" | tr -d '_ ()nat:') - credit0 ))
 [ "$credit" -gt 2000000000000 ] && [ "$credit" -le 2100000000000 ] || { echo "seller credit delta wrong: $credit"; exit 1; }
 echo "--- seller withdraws 1T of credit to the ledger"
 before=$(bal "$me")
-call withdraw "(1_000_000_000_000)" | grep >/dev/null 'Ok'
+call withdraw "(1_000_000_000_000)" | want 'Ok'
 after=$(bal "$me")
 [ $((after - before)) -eq $((1000000000000 - 100000000)) ] || { echo "withdraw moved $((after - before)), expected 1T minus the fee"; exit 1; }
 echo "--- the fee comes from the ledger, and the ledger cannot change while funds are held"
-call harberger_config | grep >/dev/null 'fee = 100_000_000 : nat'
-call set_harberger_config "(record { ledger = principal \"$names\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'funds are held'
+call harberger_config | want 'fee = 100_000_000 : nat'
+call set_harberger_config "(record { ledger = principal \"$names\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | want 'funds are held'
 echo "--- a rate change settles every flat name first (collected tax grows)"
 c0=$(treasury_field collected)
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 9000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 9000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | want 'Ok'
 [ "$(treasury_field collected)" -gt "$c0" ] || { echo "rate change did not settle"; exit 1; }
-call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | grep >/dev/null 'Ok'
+call set_harberger_config "(record { ledger = principal \"$ledger\"; rate_bps = 10000 : nat32; min_price = 1_000_000_000; grace_ns = 2_000_000_000 : nat64; fee = 0; flat_names_open = true; handover_warn_ns = 30_000_000_000 : nat64 })" | want 'Ok'
 
 echo "--- a name whose deposit runs out lapses, frees, and goes back to auction"
 lapse="fl$run-b"
 # One or two bids per auction from here on: shorter phases.
 auction_cfg 10 10
 # $id wins alone at the reserve; smoke-other commits and never reveals.
-bid_as smoke-other "$lapse" 5_000_000_000 5_000_000_000 s-never | grep >/dev/null 'Ok'
+bid_as smoke-other "$lapse" 5_000_000_000 5_000_000_000 s-never | want 'Ok'
 win smoke-local "$lapse" "$handle/app" 2_000_000_000 10_000_000_000
 # At the maximum price the opening balance is gone at once: grace, then free.
-call set_price "(\"$lapse\", 1_000_000_000_000_000_000)" | grep >/dev/null 'Ok'
+call set_price "(\"$lapse\", 1_000_000_000_000_000_000)" | want 'Ok'
 sleep 4
-call flat_status "(\"$lapse\")" | grep >/dev/null 'status = variant { free }' || { echo "expected free after grace"; call flat_status "(\"$lapse\")"; exit 1; }
-call resolve "(\"$lapse\")" | grep >/dev/null 'has lapsed'
-call deposit "(\"$lapse\", 1_000_000)" | grep >/dev/null 'bid for it instead'
-call buy "(\"$lapse\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000, 1_000_000_000_000_000_000)" | grep >/dev/null 'bid for it instead'
+call flat_status "(\"$lapse\")" | want 'status = variant { free }' || { echo "expected free after grace"; call flat_status "(\"$lapse\")"; exit 1; }
+call resolve "(\"$lapse\")" | want 'has lapsed'
+call deposit "(\"$lapse\", 1_000_000)" | want 'bid for it instead'
+call buy "(\"$lapse\", \"$handle/app\", 1_000_000_000_000, 100_000_000_000, 1_000_000_000_000_000_000)" | want 'bid for it instead'
 # A longer grace, so the top-up below lands before the opening balance and
 # its grace run out.
 harb_cfg 10000 10 true
 win smoke-other "$lapse" "$handle/self" 1_000_000_000_000 1_100_000_000_000
 echo "--- top up keeps a name active"
 out=$(dfx canister call --identity smoke-other names deposit "(\"$lapse\", 1_000_000_000)")
-echo "$out" | grep >/dev/null 'Ok' || { echo "top-up after the re-sale failed: $out"; exit 1; }
+echo "$out" | want 'Ok' || { echo "top-up after the re-sale failed: $out"; exit 1; }
 out=$(call get_record "(\"$lapse\")")
-echo "$out" | grep >/dev/null "owner = principal \"$other\"" || { echo "lapsed name not re-sold:"; echo "$out"; exit 1; }
-echo "$out" | grep >/dev/null "previous_target = opt variant { alias = \"$handle/app\" }" || { echo "re-sold name forgot its target:"; echo "$out"; exit 1; }
+echo "$out" | want "owner = principal \"$other\"" || { echo "lapsed name not re-sold:"; echo "$out"; exit 1; }
+echo "$out" | want "previous_target = opt variant { alias = \"$handle/app\" }" || { echo "re-sold name forgot its target:"; echo "$out"; exit 1; }
 echo "--- auction proceeds and tax were collected and the controller can fund the canister from them"
 collected=$(treasury_field collected)
 available=$((collected - $(treasury_field withdrawn)))
 [ "$available" -gt 100000000 ] || { echo "not enough to withdraw past the ledger fee (collected $collected)"; exit 1; }
-call fund_self "($((available + 1)))" | grep >/dev/null 'available to withdraw'
-call fund_self "(1)" | grep >/dev/null 'exceed the ledger fee'
-call fund_self "($available)" | grep >/dev/null 'Ok'
+call fund_self "($((available + 1)))" | want 'available to withdraw'
+call fund_self "(1)" | want 'exceed the ledger fee'
+call fund_self "($available)" | want 'Ok'
 [ "$(treasury_field withdrawn)" = "$collected" ] || { echo "withdrawn != collected after fund_self"; call treasury; exit 1; }
 echo "--- a top-up must leave one grace period of tax: dust on an empty name is refused"
 # At the maximum price and 100 percent a year the tax is about 3.2e10 per
@@ -365,30 +375,30 @@ echo "--- a top-up must leave one grace period of tax: dust on an empty name is 
 harb_cfg 10000 8 true
 dust="fl$run-c"
 win smoke-local "$dust" "$handle/app" 2_000_000_000 10_000_000_000
-call deposit "(\"$dust\", 380_000_000_000)" | grep >/dev/null 'Ok'
-call set_price "(\"$dust\", 1_000_000_000_000_000_000)" | grep >/dev/null 'Ok'
+call deposit "(\"$dust\", 380_000_000_000)" | want 'Ok'
+call set_price "(\"$dust\", 1_000_000_000_000_000_000)" | want 'Ok'
 sleep 13
-call flat_status "(\"$dust\")" | grep >/dev/null 'grace = record' || { echo "expected grace"; call flat_status "(\"$dust\")"; exit 1; }
-call deposit "(\"$dust\", 1_000)" | grep >/dev/null 'one grace period of tax'
-call deposit "(\"$dust\", 400_000_000_000)" | grep >/dev/null 'Ok'
-call flat_status "(\"$dust\")" | grep >/dev/null 'status = variant { active }'
+call flat_status "(\"$dust\")" | want 'grace = record' || { echo "expected grace"; call flat_status "(\"$dust\")"; exit 1; }
+call deposit "(\"$dust\", 1_000)" | want 'one grace period of tax'
+call deposit "(\"$dust\", 400_000_000_000)" | want 'Ok'
+call flat_status "(\"$dust\")" | want 'status = variant { active }'
 harb_cfg 10000 2 true
 echo "--- release refunds the balance as credit"
 ocredit=$(credit_of "$other")
-dfx canister call --identity smoke-other names delete_record "(\"$lapse\")" | grep >/dev/null 'Ok'
+dfx canister call --identity smoke-other names delete_record "(\"$lapse\")" | want 'Ok'
 [ "$(credit_of "$other")" -gt "$ocredit" ] || { echo "release did not credit the balance"; exit 1; }
-call flat_status "(\"$lapse\")" | grep >/dev/null '(null)'
+call flat_status "(\"$lapse\")" | want '(null)'
 echo "--- an auction left open across the upgrade below"
 held="fl$run-d"
-bid_as smoke-other "$held" 5_000_000_000 5_000_000_000 s-held | grep >/dev/null 'Ok'
+bid_as smoke-other "$held" 5_000_000_000 5_000_000_000 s-held | want 'Ok'
 
 echo "--- gateway domains: admin sets them, /.well-known/ic-domains serves them"
-call set_domains '(vec { "names.example"; "bad host" })' | grep >/dev/null 'Err'
-call set_domains '(vec { "foo..example" })' | grep >/dev/null 'Err'
-call set_domains '(vec { "-foo.example" })' | grep >/dev/null 'Err'
-call set_domains '(vec { "example" })' | grep >/dev/null 'Err'
-call set_domains '(vec { "names.example"; "alt.names.example" })' | grep >/dev/null 'Ok'
-dfx canister call --identity smoke-other names set_domains '(vec {})' | grep >/dev/null 'not a controller'
+call set_domains '(vec { "names.example"; "bad host" })' | want 'Err'
+call set_domains '(vec { "foo..example" })' | want 'Err'
+call set_domains '(vec { "-foo.example" })' | want 'Err'
+call set_domains '(vec { "example" })' | want 'Err'
+call set_domains '(vec { "names.example"; "alt.names.example" })' | want 'Ok'
+dfx canister call --identity smoke-other names set_domains '(vec {})' | want 'not a controller'
 wk=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/.well-known/ic-domains")
 [ "$wk" = "$(printf 'names.example\nalt.names.example\n')" ] || { echo "ic-domains wrong: [$wk]"; exit 1; }
 
@@ -404,27 +414,27 @@ echo "--- /api/resolve JSON on the verifying host: certified query response"
 json=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/resolve/$handle/app")
 hdr=$(curl -s -D - -o /dev/null -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/resolve/$handle/app")
 echo "$hdr" | grep -i >/dev/null '^ic-certificateexpression:' || { echo "no IC-CertificateExpression header:"; echo "$hdr"; exit 1; }
-echo "$json" | grep >/dev/null "\"canister\":\"$target\"" || { echo "api json wrong:"; echo "$json"; exit 1; }
-echo "$json" | grep >/dev/null '"certificate":"' || { echo "api json lacks certificate"; exit 1; }
-echo "$json" | grep >/dev/null '"witness":"' || { echo "api json lacks witness"; exit 1; }
-echo "$json" | grep >/dev/null '"created_ns":"[0-9]*"' || { echo "api json timestamps must be decimal strings"; echo "$json"; exit 1; }
+echo "$json" | want "\"canister\":\"$target\"" || { echo "api json wrong:"; echo "$json"; exit 1; }
+echo "$json" | want '"certificate":"' || { echo "api json lacks certificate"; exit 1; }
+echo "$json" | want '"witness":"' || { echo "api json lacks witness"; exit 1; }
+echo "$json" | want '"created_ns":"[0-9]*"' || { echo "api json timestamps must be decimal strings"; echo "$json"; exit 1; }
 echo "--- /api/search and /api/tags JSON on the verifying host"
 json=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/search?q=$handle&tag=deploy&limit=5")
-echo "$json" | grep >/dev/null "\"name\":\"$handle/app\"" || { echo "api search wrong:"; echo "$json"; exit 1; }
-echo "$json" | grep >/dev/null '"updated_ns":"[0-9]*"' || { echo "api search timestamps must be strings"; echo "$json"; exit 1; }
+echo "$json" | want "\"name\":\"$handle/app\"" || { echo "api search wrong:"; echo "$json"; exit 1; }
+echo "$json" | want '"updated_ns":"[0-9]*"' || { echo "api search timestamps must be strings"; echo "$json"; exit 1; }
 json=$(curl -s -H "Host: $names.localhost:4943" "http://127.0.0.1:4943/api/tags")
-echo "$json" | grep >/dev/null '"tag":"deploy"' || { echo "api tags wrong:"; echo "$json"; exit 1; }
+echo "$json" | want '"tag":"deploy"' || { echo "api tags wrong:"; echo "$json"; exit 1; }
 
 echo "--- upgrade keeps records, re-certifies, and lands on the current schema"
 dfx deploy --yes --identity "$id" names --upgrade-unchanged >/dev/null 2>&1
 out=$(call resolve "(\"$handle/app\")")
-echo "$out" | grep >/dev/null "canister = principal \"$target\"" || { echo "record lost across upgrade"; exit 1; }
-echo "$out" | grep >/dev/null 'certificate = opt blob' || { echo "no certificate after upgrade"; exit 1; }
-call schema_version | grep >/dev/null '(4 : nat32)' || { echo "schema not at 4 after upgrade"; exit 1; }
-call search "(record { tag = opt \"deploy\" })" | grep >/dev/null "$handle/app" || { echo "tag index lost across upgrade"; exit 1; }
-call auction_status "(\"$held\")" | grep >/dev/null "principal \"$other\"" || { echo "auction lost across upgrade"; exit 1; }
+echo "$out" | want "canister = principal \"$target\"" || { echo "record lost across upgrade"; exit 1; }
+echo "$out" | want 'certificate = opt blob' || { echo "no certificate after upgrade"; exit 1; }
+call schema_version | want '(4 : nat32)' || { echo "schema not at 4 after upgrade"; exit 1; }
+call search "(record { tag = opt \"deploy\" })" | want "$handle/app" || { echo "tag index lost across upgrade"; exit 1; }
+call auction_status "(\"$held\")" | want "principal \"$other\"" || { echo "auction lost across upgrade"; exit 1; }
 echo "--- the unrevealed commitment forfeits at close"
 wait_phase "$held" closed
-call close_auction "(\"$held\")" | tr -d '_' | grep >/dev/null 'forfeited = 5000000000 ' || { echo "unrevealed deposit not forfeited"; exit 1; }
+call close_auction "(\"$held\")" | tr -d '_' | want 'forfeited = 5000000000 ' || { echo "unrevealed deposit not forfeited"; exit 1; }
 
 echo "SMOKE OK"
